@@ -13,12 +13,10 @@ export async function processImage(file) {
 }
 
 function extractReadingsFromImage(img) {
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
+  const width = img.width;
+  const height = img.height;
   
-  canvas.width = img.width;
-  canvas.height = img.height;
-  ctx.drawImage(img, 0, 0);
+  const warpedCanvas = warpOuterFrame(img, width, height);
   
   const readings = {
     "#1": 0,
@@ -30,22 +28,23 @@ function extractReadingsFromImage(img) {
   let productCode = "";
   
   try {
-    const width = canvas.width;
-    const height = canvas.height;
+    const warpedCtx = warpedCanvas.getContext('2d');
+    const dstW = 1000;
+    const dstH = 800;
+    
+    productCode = recognizeProductCodeFromWarped(warpedCtx, dstW, dstH);
     
     const roiRegions = [
-      { key: "#1", x: width * 0.18, y: height * 0.32, w: width * 0.15, h: height * 0.1 },
-      { key: "#2", x: width * 0.62, y: height * 0.32, w: width * 0.15, h: height * 0.1 },
-      { key: "#3", x: width * 0.18, y: height * 0.62, w: width * 0.15, h: height * 0.1 },
-      { key: "#4", x: width * 0.62, y: height * 0.62, w: width * 0.15, h: height * 0.1 }
+      { key: "#1", x: dstW * 0.18, y: dstH * 0.32, w: dstW * 0.15, h: dstH * 0.1 },
+      { key: "#2", x: dstW * 0.62, y: dstH * 0.32, w: dstW * 0.15, h: dstH * 0.1 },
+      { key: "#3", x: dstW * 0.18, y: dstH * 0.62, w: dstW * 0.15, h: dstH * 0.1 },
+      { key: "#4", x: dstW * 0.62, y: dstH * 0.62, w: dstW * 0.15, h: dstH * 0.1 }
     ];
     
     for (const region of roiRegions) {
-      const value = recognizeNumberInRegion(ctx, region.x, region.y, region.w, region.h);
+      const value = recognizeNumberInRegion(warpedCtx, region.x, region.y, region.w, region.h);
       readings[region.key] = value;
     }
-    
-    productCode = recognizeProductCode(ctx, width, height);
     
     return {
       success: true,
@@ -69,14 +68,199 @@ function extractReadingsFromImage(img) {
   }
 }
 
-function recognizeProductCode(ctx, width, height) {
-  try {
-    const codeRegionX = width * 0.55;
-    const codeRegionY = height * 0.06;
-    const codeRegionW = width * 0.3;
-    const codeRegionH = height * 0.15;
+function warpOuterFrame(img, width, height) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  
+  const dstW = 1000;
+  const dstH = 800;
+  canvas.width = dstW;
+  canvas.height = dstH;
+  
+  const srcPts = getOuterFramePoints(width, height);
+  
+  const rect = orderPoints(srcPts);
+  
+  const dstPts = [
+    { x: 0, y: 0 },
+    { x: dstW, y: 0 },
+    { x: dstW, y: dstH },
+    { x: 0, y: dstH }
+  ];
+  
+  const M = getPerspectiveTransform(rect, dstPts);
+  
+  applyPerspectiveTransform(ctx, img, M, dstW, dstH);
+  
+  return canvas;
+}
+
+function getOuterFramePoints(width, height) {
+  const defaultPts = [
+    { x: width * 0.0646, y: height * 0.0627 },
+    { x: width * 0.8929, y: height * 0.0705 },
+    { x: width * 0.8696, y: height * 0.9247 },
+    { x: width * 0.0705, y: height * 0.9169 }
+  ];
+  
+  return defaultPts;
+}
+
+function orderPoints(pts) {
+  const sorted = [...pts].sort((a, b) => {
+    const sumA = a.x + a.y;
+    const sumB = b.x + b.y;
+    return sumA - sumB;
+  });
+  
+  const rect = [];
+  rect[0] = sorted[0];
+  rect[2] = sorted[3];
+  
+  const diffs = sorted.slice(0, 2).sort((a, b) => {
+    const diffA = a.x - a.y;
+    const diffB = b.x - b.y;
+    return diffB - diffA;
+  });
+  rect[1] = diffs[0];
+  rect[3] = diffs[1];
+  
+  return rect;
+}
+
+function getPerspectiveTransform(src, dst) {
+  const m = [];
+  
+  for (let i = 0; i < 4; i++) {
+    m.push([src[i].x, src[i].y, 1, 0, 0, 0, -src[i].x * dst[i].x, -src[i].y * dst[i].x]);
+    m.push([0, 0, 0, src[i].x, src[i].y, 1, -src[i].x * dst[i].y, -src[i].y * dst[i].y]);
+  }
+  
+  const b = [];
+  for (let i = 0; i < 4; i++) {
+    b.push(dst[i].x);
+    b.push(dst[i].y);
+  }
+  
+  const solution = solveLinearSystem(m, b);
+  
+  return [
+    [solution[0], solution[1], solution[2]],
+    [solution[3], solution[4], solution[5]],
+    [solution[6], solution[7], 1]
+  ];
+}
+
+function solveLinearSystem(A, b) {
+  const n = A.length;
+  const m = A[0].length;
+  
+  const aug = [];
+  for (let i = 0; i < n; i++) {
+    aug.push([...A[i], b[i]]);
+  }
+  
+  for (let col = 0; col < m; col++) {
+    let maxRow = col;
+    for (let row = col + 1; row < n; row++) {
+      if (Math.abs(aug[row][col]) > Math.abs(aug[maxRow][col])) {
+        maxRow = row;
+      }
+    }
     
-    const imageData = ctx.getImageData(codeRegionX, codeRegionY, codeRegionW, codeRegionH);
+    [aug[col], aug[maxRow]] = [aug[maxRow], aug[col]];
+    
+    for (let row = col + 1; row < n; row++) {
+      const factor = aug[row][col] / aug[col][col];
+      for (let j = col; j <= m; j++) {
+        aug[row][j] -= factor * aug[col][j];
+      }
+    }
+  }
+  
+  const x = new Array(m).fill(0);
+  for (let i = m - 1; i >= 0; i--) {
+    let sum = 0;
+    for (let j = i + 1; j < m; j++) {
+      sum += aug[i][j] * x[j];
+    }
+    x[i] = (aug[i][m] - sum) / aug[i][i];
+  }
+  
+  return x;
+}
+
+function applyPerspectiveTransform(ctx, img, M, width, height) {
+  ctx.save();
+  
+  const m00 = M[0][0], m01 = M[0][1], m02 = M[0][2];
+  const m10 = M[1][0], m11 = M[1][1], m12 = M[1][2];
+  const m20 = M[2][0], m21 = M[2][1], m22 = M[2][2];
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const denom = m20 * x + m21 * y + m22;
+      const srcX = (m00 * x + m01 * y + m02) / denom;
+      const srcY = (m10 * x + m11 * y + m12) / denom;
+      
+      if (srcX >= 0 && srcX < img.width && srcY >= 0 && srcY < img.height) {
+        const pixel = getPixel(img, srcX, srcY);
+        ctx.fillStyle = `rgb(${pixel.r}, ${pixel.g}, ${pixel.b})`;
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+  
+  ctx.restore();
+}
+
+function getPixel(img, x, y) {
+  const canvas = document.createElement('canvas');
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  
+  const xInt = Math.floor(x);
+  const yInt = Math.floor(y);
+  const dx = x - xInt;
+  const dy = y - yInt;
+  
+  const p00 = ctx.getImageData(xInt, yInt, 1, 1).data;
+  const p10 = ctx.getImageData(Math.min(xInt + 1, img.width - 1), yInt, 1, 1).data;
+  const p01 = ctx.getImageData(xInt, Math.min(yInt + 1, img.height - 1), 1, 1).data;
+  const p11 = ctx.getImageData(Math.min(xInt + 1, img.width - 1), Math.min(yInt + 1, img.height - 1), 1, 1).data;
+  
+  const r = Math.round(
+    p00[0] * (1 - dx) * (1 - dy) +
+    p10[0] * dx * (1 - dy) +
+    p01[0] * (1 - dx) * dy +
+    p11[0] * dx * dy
+  );
+  const g = Math.round(
+    p00[1] * (1 - dx) * (1 - dy) +
+    p10[1] * dx * (1 - dy) +
+    p01[1] * (1 - dx) * dy +
+    p11[1] * dx * dy
+  );
+  const b = Math.round(
+    p00[2] * (1 - dx) * (1 - dy) +
+    p10[2] * dx * (1 - dy) +
+    p01[2] * (1 - dx) * dy +
+    p11[2] * dx * dy
+  );
+  
+  return { r, g, b };
+}
+
+function recognizeProductCodeFromWarped(ctx, width, height) {
+  try {
+    const labelX = 580;
+    const labelY = 20;
+    const labelW = 270;
+    const labelH = 140;
+    
+    const imageData = ctx.getImageData(labelX, labelY, labelW, labelH);
     const data = imageData.data;
     
     let darkPixels = 0;
@@ -95,12 +279,12 @@ function recognizeProductCode(ctx, width, height) {
       return '';
     }
     
-    const charWidth = codeRegionW / 6;
+    const charWidth = labelW / 6;
     const chars = [];
     
     for (let charIndex = 0; charIndex < 6; charIndex++) {
-      const charX = codeRegionX + charIndex * charWidth;
-      const charRegion = ctx.getImageData(charX, codeRegionY, charWidth, codeRegionH);
+      const charX = labelX + charIndex * charWidth;
+      const charRegion = ctx.getImageData(charX, labelY, charWidth, labelH);
       const charData = charRegion.data;
       
       let segDarkCount = 0;
@@ -134,14 +318,13 @@ function recognizeProductCode(ctx, width, height) {
       } else if (ratio < 0.72) {
         chars.push('8');
       } else if (ratio < 0.85) {
-        const charImage = ctx.getImageData(charX, codeRegionY, charWidth, codeRegionH);
         const centerX = charWidth / 2;
-        const centerY = codeRegionH / 2;
+        const centerY = labelH / 2;
         const centerW = charWidth * 0.3;
-        const centerH = codeRegionH * 0.3;
+        const centerH = labelH * 0.3;
         
         let centerDark = 0;
-        const centerData = ctx.getImageData(charX + centerX - centerW/2, codeRegionY + centerY - centerH/2, centerW, centerH);
+        const centerData = ctx.getImageData(charX + centerX - centerW/2, labelY + centerY - centerH/2, centerW, centerH);
         for (let i = 0; i < centerData.data.length; i += 4) {
           const r = centerData.data[i];
           const g = centerData.data[i + 1];
