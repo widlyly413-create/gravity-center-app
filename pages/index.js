@@ -3,6 +3,7 @@ import FileUploader from '../components/FileUploader';
 import ProgressBar from '../components/ProgressBar';
 import ResultTable from '../components/ResultTable';
 import DownloadButton from '../components/DownloadButton';
+import { processImage } from '../utils/imageProcessor';
 import { Upload, FileImage, Archive, Trash2, Calculator, Layers, CheckCircle2 } from 'lucide-react';
 
 export default function Home() {
@@ -32,50 +33,61 @@ export default function Home() {
     setResults([]);
 
     try {
-      const filesData = await Promise.all(
-        files.map((file) => {
-          return new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-              const base64Data = e.target.result.split(',')[1];
-              resolve({
-                filename: file.name,
-                data: base64Data,
-              });
-            };
-            reader.readAsDataURL(file);
-          });
-        })
-      );
-
-      // 模拟进度更新
-      const interval = setInterval(() => {
-        setProgress(prev => {
-          if (prev >= 90) {
-            clearInterval(interval);
-            return 90;
+      const newResults = [];
+      
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        
+        try {
+          const result = await processImage(file);
+          
+          if (result.success) {
+            const weight = Math.round((result.w1 + result.w2 + result.w3 + result.w4) * 100) / 100;
+            const cog = weight > 0 
+              ? Math.round((((result.w3 + result.w4) / weight) * 150) * 10000) / 10000
+              : 0;
+            
+            newResults.push({
+              filename: file.name,
+              success: true,
+              w1: Math.round(result.w1 * 100) / 100,
+              w2: Math.round(result.w2 * 100) / 100,
+              w3: Math.round(result.w3 * 100) / 100,
+              w4: Math.round(result.w4 * 100) / 100,
+              weight,
+              cog
+            });
+          } else {
+            newResults.push({
+              filename: file.name,
+              success: false,
+              w1: 0,
+              w2: 0,
+              w3: 0,
+              w4: 0,
+              weight: 0,
+              cog: 0,
+              error: result.error
+            });
           }
-          return prev + 10;
-        });
-      }, 200);
-
-      const response = await fetch('/api/process', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ files: filesData }),
-      });
-
-      clearInterval(interval);
-
-      if (!response.ok) {
-        throw new Error('处理失败');
+        } catch (error) {
+          newResults.push({
+            filename: file.name,
+            success: false,
+            w1: 0,
+            w2: 0,
+            w3: 0,
+            w4: 0,
+            weight: 0,
+            cog: 0,
+            error: error.message
+          });
+        }
+        
+        setProgress(Math.round(((i + 1) / files.length) * 100));
       }
-
-      const data = await response.json();
-      setResults(data.results);
-      setProgress(100);
+      
+      setResults(newResults);
     } catch (error) {
       console.error('处理错误:', error);
       alert('处理失败，请重试');
