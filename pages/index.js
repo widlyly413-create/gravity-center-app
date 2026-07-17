@@ -42,24 +42,28 @@ export default function Home() {
           const result = await processImage(file);
           
           if (result.success) {
-            const weight = Math.round((result.w1 + result.w2 + result.w3 + result.w4) * 100) / 100;
-            const cog = weight > 0 
-              ? Math.round((((result.w3 + result.w4) / weight) * 150) * 10000) / 10000
+            const totalWeight = result.w1 + result.w2 + result.w3 + result.w4;
+            const avgWeight = Math.round(totalWeight / 4 * 100) / 100;
+            const cog = totalWeight > 0 
+              ? Math.round((((result.w3 + result.w4) / totalWeight) * 150) * 10000) / 10000
               : 0;
             
             newResults.push({
               filename: file.name,
+              productCode: result.productCode || '',
               success: true,
               w1: Math.round(result.w1 * 100) / 100,
               w2: Math.round(result.w2 * 100) / 100,
               w3: Math.round(result.w3 * 100) / 100,
               w4: Math.round(result.w4 * 100) / 100,
-              weight,
-              cog
+              weight: avgWeight,
+              cog,
+              totalWeight: Math.round(totalWeight * 100) / 100
             });
           } else {
             newResults.push({
               filename: file.name,
+              productCode: '',
               success: false,
               w1: 0,
               w2: 0,
@@ -67,12 +71,14 @@ export default function Home() {
               w4: 0,
               weight: 0,
               cog: 0,
+              totalWeight: 0,
               error: result.error
             });
           }
         } catch (error) {
           newResults.push({
             filename: file.name,
+            productCode: '',
             success: false,
             w1: 0,
             w2: 0,
@@ -80,6 +86,7 @@ export default function Home() {
             w4: 0,
             weight: 0,
             cog: 0,
+            totalWeight: 0,
             error: error.message
           });
         }
@@ -99,10 +106,11 @@ export default function Home() {
   const handleDownloadCSV = useCallback(() => {
     if (results.length === 0) return;
 
-    const headers = ['文件名', '#1', '#2', '#3', '#4', '重量 (Weight)', '重心 (CoG)'];
+    const headers = ['产品编号', '文件名', '#1', '#2', '#3', '#4', '平均重量', '重心 (CoG)'];
     const csvContent = [
       headers.join(','),
       ...results.map(r => [
+        `"${r.productCode || ''}"`,
         `"${r.filename}"`,
         r.w1,
         r.w2,

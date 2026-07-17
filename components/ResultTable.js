@@ -2,7 +2,7 @@ import { CheckCircle2, XCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { useState } from 'react';
 
 export default function ResultTable({ results }) {
-  const [sortConfig, setSortConfig] = useState({ key: 'filename', direction: 'asc' });
+  const [sortConfig, setSortConfig] = useState({ key: 'productCode', direction: 'asc' });
   const [expandedRows, setExpandedRows] = useState(new Set());
 
   const handleSort = (key) => {
@@ -42,10 +42,23 @@ export default function ResultTable({ results }) {
       : <ChevronDown className="w-4 h-4 text-primary-500" />;
   };
 
-  const totalWeight = results.reduce((sum, r) => sum + (r.weight || 0), 0);
-  const avgCog = results.length > 0 
-    ? (results.reduce((sum, r) => sum + (r.cog || 0), 0) / results.length).toFixed(2)
+  const successResults = results.filter(r => r.success);
+  const totalAvgWeight = successResults.reduce((sum, r) => sum + (r.weight || 0), 0);
+  const avgCog = successResults.length > 0 
+    ? (successResults.reduce((sum, r) => sum + (r.cog || 0), 0) / successResults.length).toFixed(2)
     : '0';
+
+  const groupedByProduct = successResults.reduce((acc, r) => {
+    const code = r.productCode || '未识别';
+    if (!acc[code]) {
+      acc[code] = { results: [], count: 0, totalAvgWeight: 0, totalCog: 0 };
+    }
+    acc[code].results.push(r);
+    acc[code].count++;
+    acc[code].totalAvgWeight += r.weight || 0;
+    acc[code].totalCog += r.cog || 0;
+    return acc;
+  }, {});
 
   return (
     <div className="overflow-hidden">
@@ -57,13 +70,13 @@ export default function ResultTable({ results }) {
         </div>
         <div className="text-center">
           <p className="text-2xl font-bold text-success-500">
-            {results.filter(r => r.success).length}
+            {successResults.length}
           </p>
           <p className="text-xs text-neutral-500">成功</p>
         </div>
         <div className="text-center">
-          <p className="text-2xl font-bold text-primary-600">{totalWeight.toFixed(2)}</p>
-          <p className="text-xs text-neutral-500">总重量</p>
+          <p className="text-2xl font-bold text-primary-600">{totalAvgWeight.toFixed(2)}</p>
+          <p className="text-xs text-neutral-500">平均重量总计</p>
         </div>
         <div className="text-center">
           <p className="text-2xl font-bold text-accent-600">{avgCog}</p>
@@ -71,11 +84,33 @@ export default function ResultTable({ results }) {
         </div>
       </div>
 
+      {/* 产品分组统计 */}
+      {Object.keys(groupedByProduct).length > 0 && (
+        <div className="mb-6 p-4 bg-gradient-to-r from-primary-50 to-accent-50 rounded-xl border border-primary-100">
+          <p className="text-sm font-semibold text-neutral-700 mb-3">产品分组统计</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+            {Object.entries(groupedByProduct).map(([code, data]) => (
+              <div key={code} className="bg-white rounded-lg p-3 shadow-sm">
+                <p className="text-xs text-neutral-500 mb-1">产品 {code}</p>
+                <p className="text-lg font-semibold text-neutral-800">{data.count} 次</p>
+                <p className="text-xs text-primary-600">平均: {(data.totalAvgWeight / data.count).toFixed(2)}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="overflow-x-auto rounded-xl border border-neutral-200">
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-gradient-to-r from-neutral-50 to-neutral-100">
-              <th className="px-6 py-4 text-left font-semibold text-neutral-600 rounded-tl-xl">
+              <th className="px-4 py-4 text-center font-semibold text-neutral-600 rounded-tl-xl">
+                <button onClick={() => handleSort('productCode')} className="flex items-center justify-center gap-2 hover:text-primary-600 transition-colors">
+                  产品编号
+                  {renderSortIcon('productCode')}
+                </button>
+              </th>
+              <th className="px-6 py-4 text-left font-semibold text-neutral-600">
                 <button onClick={() => handleSort('filename')} className="flex items-center gap-2 hover:text-primary-600 transition-colors">
                   文件名
                   {renderSortIcon('filename')}
@@ -107,7 +142,7 @@ export default function ResultTable({ results }) {
               </th>
               <th className="px-4 py-4 text-center font-semibold text-neutral-600">
                 <button onClick={() => handleSort('weight')} className="flex items-center justify-center gap-2 hover:text-primary-600 transition-colors">
-                  重量
+                  平均重量
                   {renderSortIcon('weight')}
                 </button>
               </th>
@@ -117,7 +152,7 @@ export default function ResultTable({ results }) {
                   {renderSortIcon('cog')}
                 </button>
               </th>
-              <th className="px-6 py-4 text-center font-semibold text-neutral-600 rounded-tr-xl">状态</th>
+              <th className="px-4 py-4 text-center font-semibold text-neutral-600 rounded-tr-xl">状态</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-neutral-100">
@@ -130,6 +165,15 @@ export default function ResultTable({ results }) {
                   }`}
                   onClick={() => toggleRow(index)}
                 >
+                  <td className="px-4 py-4 text-center">
+                    <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                      result.productCode 
+                        ? 'bg-primary-50 text-primary-700' 
+                        : 'bg-neutral-100 text-neutral-500'
+                    }`}>
+                      {result.productCode || '未识别'}
+                    </span>
+                  </td>
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
                       {result.success ? (
@@ -165,7 +209,7 @@ export default function ResultTable({ results }) {
                   <td className="px-4 py-4 text-center font-semibold text-accent-600">
                     {result.cog ?? '-'}
                   </td>
-                  <td className="px-6 py-4 text-center">
+                  <td className="px-4 py-4 text-center">
                     <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${
                       result.success
                         ? 'bg-success-50 text-success-700'
@@ -187,10 +231,10 @@ export default function ResultTable({ results }) {
                 </tr>
                 {expandedRows.has(index) && result.success && (
                   <tr className="bg-neutral-50">
-                    <td colSpan={8} className="px-6 py-4">
+                    <td colSpan={9} className="px-6 py-4">
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div className="p-4 bg-white rounded-xl border border-neutral-100">
-                          <p className="text-xs text-neutral-500 mb-2">计算详情</p>
+                          <p className="text-xs text-neutral-500 mb-2">传感器读数</p>
                           <div className="grid grid-cols-4 gap-4 text-center">
                             <div>
                               <p className="text-lg font-semibold text-neutral-800">{result.w1}</p>
@@ -212,14 +256,17 @@ export default function ResultTable({ results }) {
                         </div>
                         <div className="p-4 bg-white rounded-xl border border-neutral-100">
                           <p className="text-xs text-neutral-500 mb-2">计算结果</p>
-                          <div className="flex items-center justify-between">
+                          <div className="grid grid-cols-3 gap-4 text-center">
                             <div>
-                              <p className="text-2xl font-bold text-primary-600">{result.weight}</p>
+                              <p className="text-xl font-bold text-primary-600">{result.weight}</p>
+                              <p className="text-xs text-neutral-500">平均重量</p>
+                            </div>
+                            <div>
+                              <p className="text-xl font-bold text-secondary-600">{result.totalWeight || (result.weight * 4).toFixed(2)}</p>
                               <p className="text-xs text-neutral-500">总重量</p>
                             </div>
-                            <div className="w-px h-12 bg-neutral-200"></div>
                             <div>
-                              <p className="text-2xl font-bold text-accent-600">{result.cog}</p>
+                              <p className="text-xl font-bold text-accent-600">{result.cog}</p>
                               <p className="text-xs text-neutral-500">重心位置</p>
                             </div>
                           </div>
