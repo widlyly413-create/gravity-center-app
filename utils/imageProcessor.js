@@ -255,10 +255,10 @@ function getPixel(img, x, y) {
 
 function recognizeProductCodeFromWarped(ctx, width, height) {
   try {
-    const labelX = 580;
-    const labelY = 20;
-    const labelW = 270;
-    const labelH = 140;
+    const labelX = 180;
+    const labelY = 60;
+    const labelW = 120;
+    const labelH = 80;
     
     const imageData = ctx.getImageData(labelX, labelY, labelW, labelH);
     const grayData = rgbToGrayscale(imageData.data, labelW, labelH);
