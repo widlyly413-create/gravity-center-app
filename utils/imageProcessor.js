@@ -263,12 +263,16 @@ function recognizeProductCodeFromWarped(ctx, width, height) {
     const imageData = ctx.getImageData(labelX, labelY, labelW, labelH);
     const grayData = rgbToGrayscale(imageData.data, labelW, labelH);
     
-    const thresholded = applyAdaptiveThreshold(grayData, labelW, labelH, 21, 10);
+    const blurred = applyBilateralFilter(grayData, labelW, labelH, 9, 75, 75);
+    
+    const thresholded = applyAdaptiveThreshold(blurred, labelW, labelH, 25, 8);
+    
+    const dilated = applyDilation(thresholded, labelW, labelH, 2, 1);
     
     let darkPixels = 0;
     let totalPixels = labelW * labelH;
-    for (let i = 0; i < thresholded.length; i++) {
-      if (thresholded[i] === 0) {
+    for (let i = 0; i < dilated.length; i++) {
+      if (dilated[i] === 0) {
         darkPixels++;
       }
     }
@@ -277,7 +281,7 @@ function recognizeProductCodeFromWarped(ctx, width, height) {
       return '';
     }
     
-    const chars = segmentAndRecognize(thresholded, labelW, labelH);
+    const chars = segmentAndRecognize(dilated, labelW, labelH);
     
     let result = chars.join('').replace(/-+/g, '-').replace(/^-|-$/g, '');
     const validPattern = /^[0-9]+[-]?[0-9]*$/;
@@ -301,6 +305,80 @@ function rgbToGrayscale(rgbData, width, height) {
     gray[i / 4] = Math.round((r * 0.299 + g * 0.587 + b * 0.114));
   }
   return gray;
+}
+
+function applyBilateralFilter(gray, width, height, d, sigmaColor, sigmaSpace) {
+  const result = new Uint8Array(width * height);
+  const radius = Math.floor(d / 2);
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sumWeight = 0;
+      let sumPixel = 0;
+      
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          
+          const idx = ny * width + nx;
+          const centerIdx = y * width + x;
+          
+          const colorDiff = Math.abs(gray[centerIdx] - gray[idx]);
+          const colorWeight = Math.exp(-(colorDiff * colorDiff) / (2 * sigmaColor * sigmaColor));
+          
+          const spaceDist = dx * dx + dy * dy;
+          const spaceWeight = Math.exp(-spaceDist / (2 * sigmaSpace * sigmaSpace));
+          
+          const weight = colorWeight * spaceWeight;
+          
+          sumWeight += weight;
+          sumPixel += gray[idx] * weight;
+        }
+      }
+      
+      result[y * width + x] = Math.round(sumPixel / sumWeight);
+    }
+  }
+  
+  return result;
+}
+
+function applyDilation(binary, width, height, kernelSize, iterations) {
+  let result = new Uint8Array(binary);
+  
+  for (let iter = 0; iter < iterations; iter++) {
+    const temp = new Uint8Array(width * height);
+    
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let hasDark = false;
+        
+        for (let dy = -Math.floor(kernelSize / 2); dy <= Math.floor(kernelSize / 2); dy++) {
+          for (let dx = -Math.floor(kernelSize / 2); dx <= Math.floor(kernelSize / 2); dx++) {
+            const nx = x + dx;
+            const ny = y + dy;
+            
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+              if (result[ny * width + nx] === 0) {
+                hasDark = true;
+                break;
+              }
+            }
+          }
+          if (hasDark) break;
+        }
+        
+        temp[y * width + x] = hasDark ? 0 : 255;
+      }
+    }
+    
+    result = temp;
+  }
+  
+  return result;
 }
 
 function applyAdaptiveThreshold(gray, width, height, blockSize, C) {
