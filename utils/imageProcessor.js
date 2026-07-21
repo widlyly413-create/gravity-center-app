@@ -1,4 +1,4 @@
-// 固定目标尺寸
+// 固定目标尺寸（与本地测试脚本一致）
 const TARGET_WIDTH = 1030;
 const TARGET_HEIGHT = 590;
 
@@ -166,7 +166,7 @@ function extractReadingsFromImage(img) {
   }
 }
 
-// ==================== 蓝色掩膜检测 ====================
+// ==================== 蓝色掩膜检测（与本地测试脚本一致） ====================
 function detectScreenByBlueMask(img, width, height) {
   const tempCanvas = document.createElement('canvas');
   tempCanvas.width = width;
@@ -195,13 +195,19 @@ function detectScreenByBlueMask(img, width, height) {
     }
   }
   
-  // 形态学闭运算（填充空洞）
+  // 形态学闭运算（填充空洞）- 与本地测试一致使用30x30核
   const closedMask = applyMorphologicalClose(blueMask, width, height, 30);
   
   // 寻找轮廓
   const contours = findContours(closedMask, width, height);
   if (contours.length === 0) {
-    return null;
+    console.log("⚠️ 未找到轮廓，使用保底坐标");
+    return orderPoints([
+      { x: 350, y: 264 },
+      { x: 1186, y: 264 },
+      { x: 1182, y: 595 },
+      { x: 353, y: 595 }
+    ]);
   }
   
   // 找到最大轮廓
@@ -215,27 +221,21 @@ function detectScreenByBlueMask(img, width, height) {
     }
   }
   
-  // 多边形逼近获取4个角点
-  const approx = approximatePolygon(largestContour, 0.05);
-  if (approx.length === 4) {
-    return orderPoints(approx);
-  }
+  // 多边形逼近获取4个角点（与本地测试一致，尝试不同容差）
+  const perimeter = calculatePerimeter(largestContour);
+  let approx = null;
   
-  // 尝试不同的容差
-  for (const tolerance of [0.03, 0.04, 0.05, 0.06, 0.07, 0.08]) {
-    const tempApprox = approximatePolygon(largestContour, tolerance);
-    if (tempApprox.length === 4) {
-      return orderPoints(tempApprox);
+  for (const tolerance of [0.02, 0.03, 0.04, 0.05, 0.06]) {
+    approx = approximatePolygon(largestContour, tolerance);
+    if (approx.length === 4) {
+      console.log(`✓ 使用容差 ${tolerance} 成功获取4个角点`);
+      return orderPoints(approx);
     }
   }
   
-  // 使用保底坐标
-  return orderPoints([
-    { x: 350, y: 264 },
-    { x: 1186, y: 264 },
-    { x: 1182, y: 595 },
-    { x: 353, y: 595 }
-  ]);
+  // 无法获取4个角点，返回失败
+  console.log("⚠️ 无法获取4个角点，返回失败");
+  return null;
 }
 
 // ==================== 颜色判断 ====================
@@ -454,25 +454,26 @@ function pointToLineDistance(point, lineStart, lineEnd) {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-// ==================== 透视变换 ====================
+// ==================== 透视变换（与本地测试脚本一致） ====================
 function orderPoints(pts) {
-  const sorted = [...pts].sort((a, b) => {
-    const sumA = a.x + a.y;
-    const sumB = b.x + b.y;
-    return sumA - sumB;
-  });
+  // 标准化排序4个角点：[左上, 右上, 右下, 左下]
+  const rect = [{}, {}, {}, {}];
   
-  const rect = [];
-  rect[0] = sorted[0];
-  rect[2] = sorted[sorted.length - 1];
+  // 计算每个点的x+y
+  const sums = pts.map(p => p.x + p.y);
+  const minSumIdx = sums.indexOf(Math.min(...sums));
+  const maxSumIdx = sums.indexOf(Math.max(...sums));
   
-  const diffs = sorted.slice(0, 2).sort((a, b) => {
-    const diffA = a.x - a.y;
-    const diffB = b.x - b.y;
-    return diffB - diffA;
-  });
-  rect[1] = diffs[0];
-  rect[3] = diffs[1];
+  rect[0] = pts[minSumIdx]; // 左上（x+y最小）
+  rect[2] = pts[maxSumIdx]; // 右下（x+y最大）
+  
+  // 计算每个点的x-y
+  const diffs = pts.map(p => p.x - p.y);
+  const maxDiffIdx = diffs.indexOf(Math.max(...diffs));
+  const minDiffIdx = diffs.indexOf(Math.min(...diffs));
+  
+  rect[1] = pts[maxDiffIdx]; // 右上（x-y最大）
+  rect[3] = pts[minDiffIdx]; // 左下（x-y最小）
   
   return rect;
 }
