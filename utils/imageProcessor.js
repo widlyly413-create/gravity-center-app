@@ -1206,40 +1206,7 @@ function applyBilateralFilter(gray, width, height, d, sigmaColor, sigmaSpace) {
   return result;
 }
 
-function applyDilation(binary, width, height, kernelSize, iterations) {
-  let result = new Uint8Array(binary);
-  
-  for (let iter = 0; iter < iterations; iter++) {
-    const temp = new Uint8Array(width * height);
-    
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        let hasDark = false;
-        
-        for (let dy = -Math.floor(kernelSize / 2); dy <= Math.floor(kernelSize / 2); dy++) {
-          for (let dx = -Math.floor(kernelSize / 2); dx <= Math.floor(kernelSize / 2); dx++) {
-            const nx = x + dx;
-            const ny = y + dy;
-            
-            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-              if (result[ny * width + nx] === 0) {
-                hasDark = true;
-                break;
-              }
-            }
-          }
-          if (hasDark) break;
-        }
-        
-        temp[y * width + x] = hasDark ? 0 : 255;
-      }
-    }
-    
-    result = temp;
-  }
-  
-  return result;
-}
+
 
 function applyAdaptiveThreshold(gray, width, height, blockSize, C) {
   const result = new Uint8Array(width * height);
