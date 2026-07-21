@@ -242,9 +242,9 @@ function detectScreenByBlueMaskFromCanvas(ctx, width, height) {
   
   // 定义多个蓝色范围，增加检测鲁棒性
   const blueRanges = [
-    { hMin: 90, hMax: 130, sMin: 50, vMin: 50 },   // 标准蓝色
-    { hMin: 75, hMax: 145, sMin: 30, vMin: 30 },   // 宽松蓝色
-    { hMin: 85, hMax: 135, sMin: 40, vMin: 40 }    // 中等蓝色
+    { hMin: 200, hMax: 260, sMin: 50, vMin: 50 },   // 标准蓝色 (0-360范围)
+    { hMin: 190, hMax: 270, sMin: 30, vMin: 30 },   // 宽松蓝色
+    { hMin: 195, hMax: 265, sMin: 40, vMin: 40 }    // 中等蓝色
   ];
   
   for (let y = 0; y < height; y++) {
@@ -322,14 +322,9 @@ function detectScreenByBlueMaskFromCanvas(ctx, width, height) {
     }
   }
   
-  // 无法获取4个角点，使用保底坐标
-  console.log("⚠️ 无法获取4个角点，使用保底坐标");
-  return orderPoints([
-    { x: 350, y: 264 },
-    { x: 1186, y: 264 },
-    { x: 1182, y: 595 },
-    { x: 353, y: 595 }
-  ]);
+  // 无法获取4个角点
+  console.log("❌ 无法获取4个角点");
+  return null;
 }
 
 // ==================== 蓝色掩膜检测（与本地测试脚本一致，兼容Image输入） ====================
