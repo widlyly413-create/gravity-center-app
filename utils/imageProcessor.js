@@ -15,32 +15,28 @@ export async function processImage(file) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      // 步骤1: 先在原始尺寸图片上进行蓝色掩膜检测，确保准确找到屏幕区域
+      // 步骤1: 先在原始尺寸图片上进行标准边缘检测（基于1030:590比例的四边形检测）
       console.log(`原始图片尺寸: ${img.width} x ${img.height}`);
       
-      // 先在原始图上检测蓝色区域
       const srcCanvas = document.createElement('canvas');
       srcCanvas.width = img.width;
       srcCanvas.height = img.height;
       const srcCtx = srcCanvas.getContext('2d');
       srcCtx.drawImage(img, 0, 0);
       
-      // 提取原始图片数据进行蓝色掩膜检测
-      let rect = detectScreenByBlueMaskFromCanvas(srcCtx, img.width, img.height);
+      // 优先使用标准边缘检测算法（类似OpenCV的Canny+轮廓+四边形检测）
+      let rect = fallbackEdgeDetection(srcCtx, img.width, img.height);
       
-      // 步骤2: 验证蓝色掩膜检测结果是否有效（通过长宽比验证）
-      let useFallback = false;
+      // 步骤2: 如果边缘检测失败，尝试蓝色掩膜检测作为备选
       if (!rect) {
-        console.log('❌ 蓝色掩膜检测失败');
-        useFallback = true;
-      } else if (!isValidAspectRatio(rect)) {
-        console.log('⚠️ 蓝色掩膜检测结果不符合 1030:590 比例，启动边缘检测保底');
-        useFallback = true;
-      }
-      
-      // 步骤3: 如果蓝色掩膜检测失败或结果无效，启动边缘检测保底方案
-      if (useFallback) {
-        rect = fallbackEdgeDetection(srcCtx, img.width, img.height);
+        console.log('❌ 边缘检测失败，尝试蓝色掩膜检测');
+        rect = detectScreenByBlueMaskFromCanvas(srcCtx, img.width, img.height);
+        
+        // 验证蓝色掩膜检测结果
+        if (rect && !isValidAspectRatio(rect)) {
+          console.log('⚠️ 蓝色掩膜检测结果不符合 1030:590 比例');
+          rect = null;
+        }
       }
       
       if (!rect) {
@@ -60,7 +56,7 @@ export async function processImage(file) {
       
       console.log(`检测到屏幕角点: TL(${tl.x},${tl.y}) TR(${tr.x},${tr.y}) BR(${br.x},${br.y}) BL(${bl.x},${bl.y})`);
       
-      // 步骤4: 执行透视变换到固定尺寸 1030x590
+      // 步骤3: 执行透视变换到固定尺寸 1030x590
       const dstPts = [
         { x: 0, y: 0 },
         { x: TARGET_WIDTH, y: 0 },
@@ -76,7 +72,7 @@ export async function processImage(file) {
       const screenCtx = screenCanvas.getContext('2d');
       applyPerspectiveTransform(screenCtx, img, M, TARGET_WIDTH, TARGET_HEIGHT);
       
-      // 步骤5: 继续处理识别读数
+      // 步骤4: 继续处理识别读数
       const results = extractReadingsFromPerspectiveImage(screenCtx);
       resolve(results);
     };
