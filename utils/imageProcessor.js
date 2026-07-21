@@ -1,3 +1,16 @@
+// 固定目标尺寸
+const TARGET_WIDTH = 1030;
+const TARGET_HEIGHT = 590;
+
+// 区域坐标定义（按照用户提供的新坐标）
+const REGIONS = {
+  productCode: { x1: 0, x2: 435, y1: 0, y2: 90 },
+  sensor1: { x1: 175, x2: 470, y1: 90, y2: 225 },
+  sensor2: { x1: 650, x2: 950, y1: 90, y2: 225 },
+  sensor3: { x1: 175, x2: 470, y1: 340, y2: 475 },
+  sensor4: { x1: 650, x2: 950, y1: 340, y2: 475 }
+};
+
 export async function processImage(file) {
   return new Promise((resolve) => {
     const img = new Image();
@@ -16,8 +29,6 @@ function extractReadingsFromImage(img) {
   const width = img.width;
   const height = img.height;
   
-  const warpedCanvas = warpOuterFrame(img, width, height);
-  
   const readings = {
     "#1": 0,
     "#2": 0,
@@ -28,30 +39,119 @@ function extractReadingsFromImage(img) {
   let productCode = "";
   
   try {
-    const warpedCtx = warpedCanvas.getContext('2d');
-    const dstW = 1000;
-    const dstH = 800;
+    // ============================================
+    // 步骤1: 使用蓝色掩膜检测屏幕区域
+    // ============================================
+    const rect = detectScreenByBlueMask(img, width, height);
     
-    productCode = recognizeProductCodeFromWarped(warpedCtx, dstW, dstH);
+    if (!rect) {
+      console.log('⚠️ 蓝色掩膜检测失败，使用保底坐标');
+      return {
+        success: false,
+        error: '屏幕检测失败',
+        w1: 0, w2: 0, w3: 0, w4: 0,
+        productCode: ""
+      };
+    }
     
-    const roiRegions = [
-      { key: "#1", x: dstW * 0.18, y: dstH * 0.32, w: dstW * 0.15, h: dstH * 0.1 },
-      { key: "#2", x: dstW * 0.62, y: dstH * 0.32, w: dstW * 0.15, h: dstH * 0.1 },
-      { key: "#3", x: dstW * 0.18, y: dstH * 0.62, w: dstW * 0.15, h: dstH * 0.1 },
-      { key: "#4", x: dstW * 0.62, y: dstH * 0.62, w: dstW * 0.15, h: dstH * 0.1 }
+    const tl = rect[0];
+    const tr = rect[1];
+    const br = rect[2];
+    const bl = rect[3];
+    
+    console.log(`检测到的屏幕角点: TL(${tl.x},${tl.y}) TR(${tr.x},${tr.y}) BR(${br.x},${br.y}) BL(${bl.x},${bl.y})`);
+    
+    // ============================================
+    // 步骤2: 透视变换到固定尺寸 1030x590
+    // ============================================
+    const dstPts = [
+      { x: 0, y: 0 },
+      { x: TARGET_WIDTH, y: 0 },
+      { x: TARGET_WIDTH, y: TARGET_HEIGHT },
+      { x: 0, y: TARGET_HEIGHT }
     ];
     
-    for (const region of roiRegions) {
-      const value = recognizeNumberInRegion(warpedCtx, region.x, region.y, region.w, region.h);
-      readings[region.key] = value;
+    const M = getPerspectiveTransform(rect, dstPts);
+    
+    const screenCanvas = document.createElement('canvas');
+    screenCanvas.width = TARGET_WIDTH;
+    screenCanvas.height = TARGET_HEIGHT;
+    const screenCtx = screenCanvas.getContext('2d');
+    applyPerspectiveTransform(screenCtx, img, M, TARGET_WIDTH, TARGET_HEIGHT);
+    
+    // ============================================
+    // 步骤3: 增强读数显著性（过滤蓝色背景）
+    // ============================================
+    const enhancedCanvas = document.createElement('canvas');
+    enhancedCanvas.width = TARGET_WIDTH;
+    enhancedCanvas.height = TARGET_HEIGHT;
+    const enhancedCtx = enhancedCanvas.getContext('2d');
+    
+    const imageData = screenCtx.getImageData(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
+    const data = imageData.data;
+    
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      
+      const isBlueBackground = isBlue(r, g, b);
+      
+      if (isBlueBackground) {
+        data[i] = 0;
+        data[i + 1] = 0;
+        data[i + 2] = 0;
+      } else {
+        data[i] = 255;
+        data[i + 1] = 255;
+        data[i + 2] = 255;
+      }
+    }
+    
+    enhancedCtx.putImageData(imageData, 0, 0);
+    
+    // ============================================
+    // 步骤4: 识别传感器读数（使用新坐标）
+    // ============================================
+    readings["#1"] = recognizeNumberInRegion(enhancedCtx, REGIONS.sensor1);
+    readings["#2"] = recognizeNumberInRegion(enhancedCtx, REGIONS.sensor2);
+    readings["#3"] = recognizeNumberInRegion(enhancedCtx, REGIONS.sensor3);
+    readings["#4"] = recognizeNumberInRegion(enhancedCtx, REGIONS.sensor4);
+    
+    // ============================================
+    // 步骤5: 识别产品编号（使用新坐标）
+    // ============================================
+    const labelCanvas = document.createElement('canvas');
+    const labelW = REGIONS.productCode.x2 - REGIONS.productCode.x1;
+    const labelH = REGIONS.productCode.y2 - REGIONS.productCode.y1;
+    labelCanvas.width = labelW;
+    labelCanvas.height = labelH;
+    const labelCtx = labelCanvas.getContext('2d');
+    labelCtx.drawImage(screenCanvas, 
+      REGIONS.productCode.x1, REGIONS.productCode.y1, labelW, labelH,
+      0, 0, labelW, labelH);
+    
+    productCode = recognizeProductCodeFromLabel(labelCtx, labelW, labelH);
+    
+    // ============================================
+    // 计算平均重量和重心
+    // ============================================
+    const totalWeight = readings["#1"] + readings["#2"] + readings["#3"] + readings["#4"];
+    const avgWeight = totalWeight / 4;
+    
+    let cog = 0;
+    if (totalWeight > 0) {
+      cog = ((readings["#3"] + readings["#4"]) / totalWeight) * 150;
     }
     
     return {
       success: true,
-      w1: readings["#1"],
-      w2: readings["#2"],
-      w3: readings["#3"],
-      w4: readings["#4"],
+      w1: Math.round(readings["#1"] * 100) / 100,
+      w2: Math.round(readings["#2"] * 100) / 100,
+      w3: Math.round(readings["#3"] * 100) / 100,
+      w4: Math.round(readings["#4"] * 100) / 100,
+      avgWeight: Math.round(avgWeight * 100) / 100,
+      cog: Math.round(cog * 10000) / 10000,
       productCode
     };
   } catch (error) {
@@ -59,53 +159,302 @@ function extractReadingsFromImage(img) {
     return {
       success: false,
       error: error.message,
-      w1: 0,
-      w2: 0,
-      w3: 0,
-      w4: 0,
+      w1: 0, w2: 0, w3: 0, w4: 0,
+      avgWeight: 0, cog: 0,
       productCode: ""
     };
   }
 }
 
-function warpOuterFrame(img, width, height) {
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
+// ==================== 蓝色掩膜检测 ====================
+function detectScreenByBlueMask(img, width, height) {
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = width;
+  tempCanvas.height = height;
+  const ctx = tempCanvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
   
-  const dstW = 1000;
-  const dstH = 800;
-  canvas.width = dstW;
-  canvas.height = dstH;
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
   
-  const srcPts = getOuterFramePoints(width, height);
+  // 创建蓝色掩膜
+  const blueMask = new Uint8ClampedArray(width * height);
   
-  const rect = orderPoints(srcPts);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      
+      const [h, s, v] = rgbToHsv(r, g, b);
+      // 蓝色范围: H 90-130, S >= 50, V >= 50
+      if (h >= 90 && h <= 130 && s >= 50 && v >= 50) {
+        blueMask[y * width + x] = 255;
+      }
+    }
+  }
   
-  const dstPts = [
-    { x: 0, y: 0 },
-    { x: dstW, y: 0 },
-    { x: dstW, y: dstH },
-    { x: 0, y: dstH }
-  ];
+  // 形态学闭运算（填充空洞）
+  const closedMask = applyMorphologicalClose(blueMask, width, height, 30);
   
-  const M = getPerspectiveTransform(rect, dstPts);
+  // 寻找轮廓
+  const contours = findContours(closedMask, width, height);
+  if (contours.length === 0) {
+    return null;
+  }
   
-  applyPerspectiveTransform(ctx, img, M, dstW, dstH);
+  // 找到最大轮廓
+  let largestContour = contours[0];
+  let maxArea = calculateContourArea(largestContour);
+  for (const contour of contours) {
+    const area = calculateContourArea(contour);
+    if (area > maxArea) {
+      maxArea = area;
+      largestContour = contour;
+    }
+  }
   
-  return canvas;
+  // 多边形逼近获取4个角点
+  const approx = approximatePolygon(largestContour, 0.05);
+  if (approx.length === 4) {
+    return orderPoints(approx);
+  }
+  
+  // 尝试不同的容差
+  for (const tolerance of [0.03, 0.04, 0.05, 0.06, 0.07, 0.08]) {
+    const tempApprox = approximatePolygon(largestContour, tolerance);
+    if (tempApprox.length === 4) {
+      return orderPoints(tempApprox);
+    }
+  }
+  
+  // 使用保底坐标
+  return orderPoints([
+    { x: 350, y: 264 },
+    { x: 1186, y: 264 },
+    { x: 1182, y: 595 },
+    { x: 353, y: 595 }
+  ]);
 }
 
-function getOuterFramePoints(width, height) {
-  const defaultPts = [
-    { x: width * 0.0646, y: height * 0.0627 },
-    { x: width * 0.8929, y: height * 0.0705 },
-    { x: width * 0.8696, y: height * 0.9247 },
-    { x: width * 0.0705, y: height * 0.9169 }
-  ];
-  
-  return defaultPts;
+// ==================== 颜色判断 ====================
+function isBlue(r, g, b) {
+  const [h, s, v] = rgbToHsv(r, g, b);
+  return h >= 90 && h <= 130 && s >= 50 && v >= 50;
 }
 
+function rgbToHsv(r, g, b) {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+  
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h, s, v = max;
+  
+  const d = max - min;
+  s = max === 0 ? 0 : d / max;
+  
+  if (max === min) {
+    h = 0;
+  } else {
+    switch (max) {
+      case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
+      case g: h = ((b - r) / d + 2) / 6; break;
+      case b: h = ((r - g) / d + 4) / 6; break;
+      default: h = 0;
+    }
+  }
+  
+  h = Math.round(h * 360);
+  s = Math.round(s * 100);
+  v = Math.round(v * 100);
+  
+  return [h, s, v];
+}
+
+// ==================== 形态学运算 ====================
+function applyMorphologicalClose(mask, width, height, kernelSize) {
+  const result = new Uint8ClampedArray(mask.length);
+  const halfKernel = Math.floor(kernelSize / 2);
+  
+  // 先膨胀
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let hasWhite = false;
+      for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+          const ny = y + ky;
+          const nx = x + kx;
+          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+            if (mask[ny * width + nx] > 0) {
+              hasWhite = true;
+              break;
+            }
+          }
+        }
+        if (hasWhite) break;
+      }
+      result[y * width + x] = hasWhite ? 255 : 0;
+    }
+  }
+  
+  // 再腐蚀
+  const finalResult = new Uint8ClampedArray(mask.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let allWhite = true;
+      for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+          const ny = y + ky;
+          const nx = x + kx;
+          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+            if (result[ny * width + nx] === 0) {
+              allWhite = false;
+              break;
+            }
+          } else {
+            allWhite = false;
+            break;
+          }
+        }
+        if (!allWhite) break;
+      }
+      finalResult[y * width + x] = allWhite ? 255 : 0;
+    }
+  }
+  
+  return finalResult;
+}
+
+// ==================== 轮廓检测 ====================
+function findContours(mask, width, height) {
+  const visited = new Uint8ClampedArray(mask.length);
+  const contours = [];
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (mask[y * width + x] > 0 && visited[y * width + x] === 0) {
+        const contour = [];
+        const stack = [{ x, y }];
+        
+        while (stack.length > 0) {
+          const { x: cx, y: cy } = stack.pop();
+          const idx = cy * width + cx;
+          
+          if (cx < 0 || cx >= width || cy < 0 || cy >= height) continue;
+          if (mask[idx] === 0 || visited[idx] === 1) continue;
+          
+          visited[idx] = 1;
+          contour.push({ x: cx, y: cy });
+          
+          stack.push({ x: cx + 1, y: cy });
+          stack.push({ x: cx - 1, y: cy });
+          stack.push({ x: cx, y: cy + 1 });
+          stack.push({ x: cx, y: cy - 1 });
+        }
+        
+        if (contour.length > 100) {
+          contours.push(contour);
+        }
+      }
+    }
+  }
+  
+  return contours;
+}
+
+function calculateContourArea(contour) {
+  if (contour.length < 3) return 0;
+  
+  let area = 0;
+  const n = contour.length;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    area += contour[i].x * contour[j].y;
+    area -= contour[j].x * contour[i].y;
+  }
+  
+  return Math.abs(area / 2);
+}
+
+function approximatePolygon(contour, tolerance) {
+  if (contour.length < 3) return contour;
+  
+  const perimeter = calculatePerimeter(contour);
+  const epsilon = tolerance * perimeter;
+  
+  return ramerDouglasPeucker(contour, epsilon);
+}
+
+function calculatePerimeter(contour) {
+  let perimeter = 0;
+  for (let i = 0; i < contour.length; i++) {
+    const j = (i + 1) % contour.length;
+    const dx = contour[j].x - contour[i].x;
+    const dy = contour[j].y - contour[i].y;
+    perimeter += Math.sqrt(dx * dx + dy * dy);
+  }
+  return perimeter;
+}
+
+function ramerDouglasPeucker(points, epsilon) {
+  if (points.length <= 2) return points;
+  
+  let maxDist = 0;
+  let index = 0;
+  const start = points[0];
+  const end = points[points.length - 1];
+  
+  for (let i = 1; i < points.length - 1; i++) {
+    const dist = pointToLineDistance(points[i], start, end);
+    if (dist > maxDist) {
+      maxDist = dist;
+      index = i;
+    }
+  }
+  
+  if (maxDist > epsilon) {
+    const left = ramerDouglasPeucker(points.slice(0, index + 1), epsilon);
+    const right = ramerDouglasPeucker(points.slice(index), epsilon);
+    return left.slice(0, -1).concat(right);
+  } else {
+    return [start, end];
+  }
+}
+
+function pointToLineDistance(point, lineStart, lineEnd) {
+  const A = point.x - lineStart.x;
+  const B = point.y - lineStart.y;
+  const C = lineEnd.x - lineStart.x;
+  const D = lineEnd.y - lineStart.y;
+  
+  const dot = A * C + B * D;
+  const lenSq = C * C + D * D;
+  let param = -1;
+  
+  if (lenSq !== 0) param = dot / lenSq;
+  
+  let xx, yy;
+  
+  if (param < 0) {
+    xx = lineStart.x;
+    yy = lineStart.y;
+  } else if (param > 1) {
+    xx = lineEnd.x;
+    yy = lineEnd.y;
+  } else {
+    xx = lineStart.x + param * C;
+    yy = lineStart.y + param * D;
+  }
+  
+  const dx = point.x - xx;
+  const dy = point.y - yy;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// ==================== 透视变换 ====================
 function orderPoints(pts) {
   const sorted = [...pts].sort((a, b) => {
     const sumA = a.x + a.y;
@@ -115,7 +464,7 @@ function orderPoints(pts) {
   
   const rect = [];
   rect[0] = sorted[0];
-  rect[2] = sorted[3];
+  rect[2] = sorted[sorted.length - 1];
   
   const diffs = sorted.slice(0, 2).sort((a, b) => {
     const diffA = a.x - a.y;
@@ -253,24 +602,26 @@ function getPixel(img, x, y) {
   return { r, g, b };
 }
 
-function recognizeProductCodeFromWarped(ctx, width, height) {
+// ==================== 产品编号识别 ====================
+function recognizeProductCodeFromLabel(ctx, width, height) {
   try {
-    const labelX = 150;
-    const labelY = 40;
-    const labelW = 180;
-    const labelH = 100;
-    
-    const imageData = ctx.getImageData(labelX, labelY, labelW, labelH);
-    const grayData = rgbToGrayscale(imageData.data, labelW, labelH);
-    
-    const blurred = applyBilateralFilter(grayData, labelW, labelH, 9, 75, 75);
-    
-    const thresholded = applyAdaptiveThreshold(blurred, labelW, labelH, 25, 8);
-    
-    const dilated = applyDilation(thresholded, labelW, labelH, 2, 1);
+    const imageData = ctx.getImageData(0, 0, width, height);
+    return recognizeProductCodeFromLabelData(imageData.data, width, height);
+  } catch (error) {
+    console.error('便签纸识别错误:', error);
+    return '';
+  }
+}
+
+function recognizeProductCodeFromLabelData(rgbData, width, height) {
+  try {
+    const grayData = rgbToGrayscale(rgbData, width, height);
+    const blurred = applyBilateralFilter(grayData, width, height, 9, 75, 75);
+    const thresholded = applyAdaptiveThreshold(blurred, width, height, 25, 8);
+    const dilated = applyDilation(thresholded, width, height, 2, 1);
     
     let darkPixels = 0;
-    let totalPixels = labelW * labelH;
+    let totalPixels = width * height;
     for (let i = 0; i < dilated.length; i++) {
       if (dilated[i] === 0) {
         darkPixels++;
@@ -281,7 +632,7 @@ function recognizeProductCodeFromWarped(ctx, width, height) {
       return '';
     }
     
-    const chars = segmentAndRecognize(dilated, labelW, labelH);
+    const chars = segmentAndRecognize(dilated, width, height);
     
     let result = chars.join('').replace(/-+/g, '-').replace(/^-|-$/g, '');
     const validPattern = /^[0-9]+[-]?[0-9]*$/;
@@ -630,9 +981,14 @@ function recognizeBySimpleRatio(binaryData, width, height) {
   return chars;
 }
 
-function recognizeNumberInRegion(ctx, x, y, w, h) {
+// ==================== 传感器数字识别 ====================
+function recognizeNumberInRegion(ctx, region) {
   try {
-    const imageData = ctx.getImageData(x, y, w, h);
+    const { x1, x2, y1, y2 } = region;
+    const w = x2 - x1;
+    const h = y2 - y1;
+    
+    const imageData = ctx.getImageData(x1, y1, w, h);
     const data = imageData.data;
     
     let darkPixelCount = 0;
@@ -669,8 +1025,8 @@ function recognizeNumberInRegion(ctx, x, y, w, h) {
     
     for (let row = 0; row < verticalSegments; row++) {
       for (let col = 0; col < horizontalSegments; col++) {
-        const segX = x + (w * col / horizontalSegments);
-        const segY = y + (h * row / verticalSegments);
+        const segX = x1 + (w * col / horizontalSegments);
+        const segY = y1 + (h * row / verticalSegments);
         const segW = w / horizontalSegments;
         const segH = h / verticalSegments;
         
