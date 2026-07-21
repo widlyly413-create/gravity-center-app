@@ -337,10 +337,8 @@ function rgbToHsv(r, g, b) {
 // ==================== 形态学运算 ====================
 function applyMorphologicalClose(mask, width, height, kernelSize) {
   const result = new Uint8ClampedArray(mask.length);
-  const halfKernel = Math.min(Math.floor(kernelSize / 2), 15); // 限制核大小
-  const kernelSizeSq = (halfKernel * 2 + 1) * (halfKernel * 2 + 1);
+  const halfKernel = Math.min(Math.floor(kernelSize / 2), 15);
   
-  // 优化：预计算核范围内的偏移
   const offsets = [];
   for (let ky = -halfKernel; ky <= halfKernel; ky++) {
     for (let kx = -halfKernel; kx <= halfKernel; kx++) {
@@ -348,7 +346,7 @@ function applyMorphologicalClose(mask, width, height, kernelSize) {
     }
   }
   
-  // 先膨胀
+  // Dilate
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       let hasWhite = false;
@@ -366,7 +364,7 @@ function applyMorphologicalClose(mask, width, height, kernelSize) {
     }
   }
   
-  // 再腐蚀
+  // Erode
   const finalResult = new Uint8ClampedArray(mask.length);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -374,17 +372,15 @@ function applyMorphologicalClose(mask, width, height, kernelSize) {
       for (const { ky, kx } of offsets) {
         const ny = y + ky;
         const nx = x + kx;
-          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-            if (result[ny * width + nx] === 0) {
-              allWhite = false;
-              break;
-            }
-          } else {
+        if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+          if (result[ny * width + nx] === 0) {
             allWhite = false;
             break;
           }
+        } else {
+          allWhite = false;
+          break;
         }
-        if (!allWhite) break;
       }
       finalResult[y * width + x] = allWhite ? 255 : 0;
     }
