@@ -15,8 +15,30 @@ export async function processImage(file) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      const results = extractReadingsFromImage(img);
-      resolve(results);
+      // 优化：限制图片最大尺寸，避免处理过大图片导致卡顿
+      const maxSize = 1500;
+      let width = img.width;
+      let height = img.height;
+      
+      if (width > maxSize || height > maxSize) {
+        const ratio = Math.min(maxSize / width, maxSize / height);
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
+      }
+      
+      // 创建缩小后的图片
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+      
+      const resizedImg = new Image();
+      resizedImg.onload = () => {
+        const results = extractReadingsFromImage(resizedImg);
+        resolve(results);
+      };
+      resizedImg.src = canvas.toDataURL('image/jpeg', 0.9);
     };
     img.onerror = () => {
       resolve({ success: false, error: '图片加载失败' });
@@ -315,24 +337,30 @@ function rgbToHsv(r, g, b) {
 // ==================== 形态学运算 ====================
 function applyMorphologicalClose(mask, width, height, kernelSize) {
   const result = new Uint8ClampedArray(mask.length);
-  const halfKernel = Math.floor(kernelSize / 2);
+  const halfKernel = Math.min(Math.floor(kernelSize / 2), 15); // 限制核大小
+  const kernelSizeSq = (halfKernel * 2 + 1) * (halfKernel * 2 + 1);
+  
+  // 优化：预计算核范围内的偏移
+  const offsets = [];
+  for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+    for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+      offsets.push({ ky, kx });
+    }
+  }
   
   // 先膨胀
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       let hasWhite = false;
-      for (let ky = -halfKernel; ky <= halfKernel; ky++) {
-        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
-          const ny = y + ky;
-          const nx = x + kx;
-          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-            if (mask[ny * width + nx] > 0) {
-              hasWhite = true;
-              break;
-            }
+      for (const { ky, kx } of offsets) {
+        const ny = y + ky;
+        const nx = x + kx;
+        if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+          if (mask[ny * width + nx] > 0) {
+            hasWhite = true;
+            break;
           }
         }
-        if (hasWhite) break;
       }
       result[y * width + x] = hasWhite ? 255 : 0;
     }
@@ -343,10 +371,9 @@ function applyMorphologicalClose(mask, width, height, kernelSize) {
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       let allWhite = true;
-      for (let ky = -halfKernel; ky <= halfKernel; ky++) {
-        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
-          const ny = y + ky;
-          const nx = x + kx;
+      for (const { ky, kx } of offsets) {
+        const ny = y + ky;
+        const nx = x + kx;
           if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
             if (result[ny * width + nx] === 0) {
               allWhite = false;
@@ -583,66 +610,72 @@ function solveLinearSystem(A, b) {
 }
 
 function applyPerspectiveTransform(ctx, img, M, width, height) {
-  ctx.save();
+  // 优化：预先获取源图像的像素数据
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width = img.width;
+  srcCanvas.height = img.height;
+  const srcCtx = srcCanvas.getContext('2d');
+  srcCtx.drawImage(img, 0, 0);
+  const srcImageData = srcCtx.getImageData(0, 0, img.width, img.height);
+  const srcData = srcImageData.data;
+  
+  // 优化：使用ImageData直接操作像素，避免多次fillRect调用
+  const dstImageData = ctx.createImageData(width, height);
+  const dstData = dstImageData.data;
   
   const m00 = M[0][0], m01 = M[0][1], m02 = M[0][2];
   const m10 = M[1][0], m11 = M[1][1], m12 = M[1][2];
   const m20 = M[2][0], m21 = M[2][1], m22 = M[2][2];
   
+  const srcWidth = img.width;
+  const srcHeight = img.height;
+  
+  // 优化：使用 TypedArray 直接操作，避免函数调用开销
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const denom = m20 * x + m21 * y + m22;
       const srcX = (m00 * x + m01 * y + m02) / denom;
       const srcY = (m10 * x + m11 * y + m12) / denom;
       
-      if (srcX >= 0 && srcX < img.width && srcY >= 0 && srcY < img.height) {
-        const pixel = getPixel(img, srcX, srcY);
-        ctx.fillStyle = `rgb(${pixel.r}, ${pixel.g}, ${pixel.b})`;
-        ctx.fillRect(x, y, 1, 1);
+      if (srcX >= 0 && srcX < srcWidth && srcY >= 0 && srcY < srcHeight) {
+        // 双线性插值
+        const xInt = Math.floor(srcX);
+        const yInt = Math.floor(srcY);
+        const dx = srcX - xInt;
+        const dy = srcY - yInt;
+        
+        const x1 = Math.min(xInt + 1, srcWidth - 1);
+        const y1 = Math.min(yInt + 1, srcHeight - 1);
+        
+        const idx00 = (yInt * srcWidth + xInt) * 4;
+        const idx10 = (yInt * srcWidth + x1) * 4;
+        const idx01 = (y1 * srcWidth + xInt) * 4;
+        const idx11 = (y1 * srcWidth + x1) * 4;
+        
+        const w00 = (1 - dx) * (1 - dy);
+        const w10 = dx * (1 - dy);
+        const w01 = (1 - dx) * dy;
+        const w11 = dx * dy;
+        
+        const dstIdx = (y * width + x) * 4;
+        dstData[dstIdx] = Math.round(
+          srcData[idx00] * w00 + srcData[idx10] * w10 + 
+          srcData[idx01] * w01 + srcData[idx11] * w11
+        );
+        dstData[dstIdx + 1] = Math.round(
+          srcData[idx00 + 1] * w00 + srcData[idx10 + 1] * w10 + 
+          srcData[idx01 + 1] * w01 + srcData[idx11 + 1] * w11
+        );
+        dstData[dstIdx + 2] = Math.round(
+          srcData[idx00 + 2] * w00 + srcData[idx10 + 2] * w10 + 
+          srcData[idx01 + 2] * w01 + srcData[idx11 + 2] * w11
+        );
+        dstData[dstIdx + 3] = 255; // alpha
       }
     }
   }
   
-  ctx.restore();
-}
-
-function getPixel(img, x, y) {
-  const canvas = document.createElement('canvas');
-  canvas.width = img.width;
-  canvas.height = img.height;
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, 0, 0);
-  
-  const xInt = Math.floor(x);
-  const yInt = Math.floor(y);
-  const dx = x - xInt;
-  const dy = y - yInt;
-  
-  const p00 = ctx.getImageData(xInt, yInt, 1, 1).data;
-  const p10 = ctx.getImageData(Math.min(xInt + 1, img.width - 1), yInt, 1, 1).data;
-  const p01 = ctx.getImageData(xInt, Math.min(yInt + 1, img.height - 1), 1, 1).data;
-  const p11 = ctx.getImageData(Math.min(xInt + 1, img.width - 1), Math.min(yInt + 1, img.height - 1), 1, 1).data;
-  
-  const r = Math.round(
-    p00[0] * (1 - dx) * (1 - dy) +
-    p10[0] * dx * (1 - dy) +
-    p01[0] * (1 - dx) * dy +
-    p11[0] * dx * dy
-  );
-  const g = Math.round(
-    p00[1] * (1 - dx) * (1 - dy) +
-    p10[1] * dx * (1 - dy) +
-    p01[1] * (1 - dx) * dy +
-    p11[1] * dx * dy
-  );
-  const b = Math.round(
-    p00[2] * (1 - dx) * (1 - dy) +
-    p10[2] * dx * (1 - dy) +
-    p01[2] * (1 - dx) * dy +
-    p11[2] * dx * dy
-  );
-  
-  return { r, g, b };
+  ctx.putImageData(dstImageData, 0, 0);
 }
 
 // ==================== 产品编号识别 ====================
@@ -702,35 +735,42 @@ function rgbToGrayscale(rgbData, width, height) {
 }
 
 function applyBilateralFilter(gray, width, height, d, sigmaColor, sigmaSpace) {
+  // 优化：使用更简单的高斯模糊替代双边滤波，显著提升性能
   const result = new Uint8Array(width * height);
-  const radius = Math.floor(d / 2);
+  const radius = Math.min(Math.floor(d / 2), 5); // 限制半径，避免过度计算
+  
+  // 预计算高斯权重
+  const sigma = sigmaSpace;
+  const weights = [];
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      const dist = dx * dx + dy * dy;
+      const weight = Math.exp(-dist / (2 * sigma * sigma));
+      weights.push({ dx, dy, weight });
+    }
+  }
   
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       let sumWeight = 0;
       let sumPixel = 0;
       
-      for (let dy = -radius; dy <= radius; dy++) {
-        for (let dx = -radius; dx <= radius; dx++) {
-          const nx = x + dx;
-          const ny = y + dy;
-          
-          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-          
-          const idx = ny * width + nx;
-          const centerIdx = y * width + x;
-          
-          const colorDiff = Math.abs(gray[centerIdx] - gray[idx]);
-          const colorWeight = Math.exp(-(colorDiff * colorDiff) / (2 * sigmaColor * sigmaColor));
-          
-          const spaceDist = dx * dx + dy * dy;
-          const spaceWeight = Math.exp(-spaceDist / (2 * sigmaSpace * sigmaSpace));
-          
-          const weight = colorWeight * spaceWeight;
-          
-          sumWeight += weight;
-          sumPixel += gray[idx] * weight;
-        }
+      for (const { dx, dy, weight } of weights) {
+        const nx = x + dx;
+        const ny = y + dy;
+        
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        
+        const idx = ny * width + nx;
+        const centerIdx = y * width + x;
+        
+        // 简化的颜色权重：颜色差异大则权重低
+        const colorDiff = Math.abs(gray[centerIdx] - gray[idx]);
+        const colorWeight = colorDiff < 30 ? 1 : (colorDiff < 60 ? 0.5 : 0.1);
+        
+        const totalWeight = weight * colorWeight;
+        sumWeight += totalWeight;
+        sumPixel += gray[idx] * totalWeight;
       }
       
       result[y * width + x] = Math.round(sumPixel / sumWeight);
