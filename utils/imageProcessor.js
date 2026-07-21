@@ -439,7 +439,7 @@ function extractReadingsFromPerspectiveImage(screenCtx) {
 // ==================== 颜色判断 ====================
 function isBlue(r, g, b) {
   const [h, s, v] = rgbToHsv(r, g, b);
-  return h >= 90 && h <= 130 && s >= 50 && v >= 50;
+  return h >= 200 && h <= 260 && s >= 50 && v >= 50;
 }
 
 function rgbToHsv(r, g, b) {
