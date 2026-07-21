@@ -688,10 +688,13 @@ function recognizeProductCodeFromLabel(ctx, width, height) {
 function recognizeProductCodeFromLabelData(rgbData, width, height) {
   try {
     const grayData = rgbToGrayscale(rgbData, width, height);
-    const blurred = applyBilateralFilter(grayData, width, height, 9, 75, 75);
-    const thresholded = applyAdaptiveThreshold(blurred, width, height, 25, 8);
+    
+    // 使用更简单的预处理，避免过度模糊
+    const blurred = applySimpleBlur(grayData, width, height, 3);
+    const thresholded = applyGlobalThreshold(blurred, width, height);
     const dilated = applyDilation(thresholded, width, height, 2, 1);
     
+    // 统计黑色像素
     let darkPixels = 0;
     let totalPixels = width * height;
     for (let i = 0; i < dilated.length; i++) {
@@ -700,16 +703,25 @@ function recognizeProductCodeFromLabelData(rgbData, width, height) {
       }
     }
     
-    if (darkPixels / totalPixels < 0.01) {
+    // 降低阈值，允许更少量的文字
+    if (darkPixels / totalPixels < 0.005) {
       return '';
     }
     
     const chars = segmentAndRecognize(dilated, width, height);
     
     let result = chars.join('').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    
+    // 放宽验证规则，允许单个数字或带连字符的编号
     const validPattern = /^[0-9]+[-]?[0-9]*$/;
-    if (!validPattern.test(result) || result.length < 2) {
-      result = '';
+    if (!validPattern.test(result) || result.length < 1) {
+      // 尝试仅数字模式
+      const numOnly = result.replace(/[^0-9]/g, '');
+      if (numOnly.length >= 1) {
+        result = numOnly;
+      } else {
+        result = '';
+      }
     }
     
     return result.substring(0, 10);
@@ -717,6 +729,80 @@ function recognizeProductCodeFromLabelData(rgbData, width, height) {
     console.error('产品编号识别错误:', error);
     return '';
   }
+}
+
+function applySimpleBlur(gray, width, height, kernelSize) {
+  const result = new Uint8Array(width * height);
+  const halfKernel = Math.floor(kernelSize / 2);
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      let count = 0;
+      
+      for (let dy = -halfKernel; dy <= halfKernel; dy++) {
+        for (let dx = -halfKernel; dx <= halfKernel; dx++) {
+          const ny = y + dy;
+          const nx = x + dx;
+          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+            sum += gray[ny * width + nx];
+            count++;
+          }
+        }
+      }
+      
+      result[y * width + x] = Math.round(sum / count);
+    }
+  }
+  
+  return result;
+}
+
+function applyGlobalThreshold(gray, width, height) {
+  // 使用Otsu's阈值方法自动计算阈值
+  const histogram = new Array(256).fill(0);
+  
+  for (let i = 0; i < gray.length; i++) {
+    histogram[gray[i]]++;
+  }
+  
+  let total = width * height;
+  let sum = 0;
+  for (let i = 0; i < 256; i++) {
+    sum += i * histogram[i];
+  }
+  
+  let sumB = 0;
+  let weightB = 0;
+  let maxVariance = 0;
+  let threshold = 128;
+  
+  for (let i = 0; i < 256; i++) {
+    weightB += histogram[i];
+    if (weightB === 0) continue;
+    
+    const weightF = total - weightB;
+    if (weightF === 0) break;
+    
+    sumB += i * histogram[i];
+    
+    const meanB = sumB / weightB;
+    const meanF = (sum - sumB) / weightF;
+    
+    const variance = weightB * weightF * Math.pow(meanB - meanF, 2);
+    
+    if (variance > maxVariance) {
+      maxVariance = variance;
+      threshold = i;
+    }
+  }
+  
+  const result = new Uint8Array(width * height);
+  for (let i = 0; i < gray.length; i++) {
+    result[i] = gray[i] < threshold ? 0 : 255;
+  }
+  
+  return result;
 }
 
 function rgbToGrayscale(rgbData, width, height) {
@@ -1067,87 +1153,137 @@ function recognizeNumberInRegion(ctx, region) {
     const w = x2 - x1;
     const h = y2 - y1;
     
-    const imageData = ctx.getImageData(x1, y1, w, h);
-    const data = imageData.data;
-    
-    let darkPixelCount = 0;
-    let totalPixels = 0;
-    let maxBrightness = 0;
-    let minBrightness = 255;
-    
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      
-      const brightness = (r + g + b) / 3;
-      maxBrightness = Math.max(maxBrightness, brightness);
-      minBrightness = Math.min(minBrightness, brightness);
-      
-      if (brightness < 150) {
-        darkPixelCount++;
-      }
-      totalPixels++;
-    }
-    
-    const contrast = maxBrightness - minBrightness;
-    
-    if (contrast < 30) {
-      return Math.round(Math.random() * 50);
-    }
-    
-    const darkRatio = darkPixelCount / totalPixels;
-    
-    const verticalSegments = 7;
-    const horizontalSegments = 3;
-    const segmentResults = [];
-    
-    for (let row = 0; row < verticalSegments; row++) {
-      for (let col = 0; col < horizontalSegments; col++) {
-        const segX = x1 + (w * col / horizontalSegments);
-        const segY = y1 + (h * row / verticalSegments);
-        const segW = w / horizontalSegments;
-        const segH = h / verticalSegments;
-        
-        const segData = ctx.getImageData(segX, segY, segW, segH);
-        let segDarkCount = 0;
-        
-        for (let i = 0; i < segData.data.length; i += 4) {
-          const r = segData.data[i];
-          const g = segData.data[i + 1];
-          const b = segData.data[i + 2];
-          if ((r + g + b) / 3 < 150) {
-            segDarkCount++;
-          }
-        }
-        
-        const segRatio = segDarkCount / (segW * segH);
-        segmentResults.push(segRatio > 0.15);
-      }
-    }
-    
-    const number = matchSevenSegment(segmentResults);
-    
-    if (number >= 0) {
-      return number + (Math.random() * 0.5 - 0.25);
-    }
-    
-    if (darkRatio < 0.05) return 0;
-    if (darkRatio < 0.1) return 1;
-    if (darkRatio < 0.18) return 2;
-    if (darkRatio < 0.25) return 3;
-    if (darkRatio < 0.32) return 4;
-    if (darkRatio < 0.4) return 5;
-    if (darkRatio < 0.48) return 6;
-    if (darkRatio < 0.55) return 7;
-    if (darkRatio < 0.65) return 8;
-    if (darkRatio < 0.75) return 9;
-    
-    return Math.round(Math.random() * 50);
+    // 尝试识别包含小数的完整数字
+    return recognizeNumberWithDecimal(ctx, x1, y1, w, h);
   } catch (error) {
     console.error('数字识别错误:', error);
     return Math.round(Math.random() * 50);
   }
+}
+
+function recognizeNumberWithDecimal(ctx, x, y, w, h) {
+  // 将区域分成整数部分和小数部分
+  const intWidth = Math.floor(w * 0.55);
+  const decimalWidth = w - intWidth;
+  
+  // 识别整数部分
+  const intNumber = recognizeSingleDigitGroup(ctx, x, y, intWidth, h);
+  
+  // 检查是否有小数点
+  const dotRegionX = x + intWidth;
+  const dotRegionY = y + h * 0.3;
+  const dotRegionW = Math.floor(w * 0.1);
+  const dotRegionH = Math.floor(h * 0.4);
+  
+  const hasDot = checkHasDecimalPoint(ctx, dotRegionX, dotRegionY, dotRegionW, dotRegionH);
+  
+  // 识别小数部分
+  let decimalPart = 0;
+  if (hasDot && decimalWidth > 10) {
+    const decimalNumber = recognizeSingleDigitGroup(ctx, x + intWidth + dotRegionW, y, decimalWidth - dotRegionW, h);
+    decimalPart = decimalNumber / 10;
+  }
+  
+  return intNumber + decimalPart;
+}
+
+function recognizeSingleDigitGroup(ctx, x, y, w, h) {
+  const imageData = ctx.getImageData(x, y, w, h);
+  const data = imageData.data;
+  
+  let darkPixelCount = 0;
+  let totalPixels = 0;
+  let maxBrightness = 0;
+  let minBrightness = 255;
+  
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    
+    const brightness = (r + g + b) / 3;
+    maxBrightness = Math.max(maxBrightness, brightness);
+    minBrightness = Math.min(minBrightness, brightness);
+    
+    if (brightness < 150) {
+      darkPixelCount++;
+    }
+    totalPixels++;
+  }
+  
+  const contrast = maxBrightness - minBrightness;
+  
+  if (contrast < 30) {
+    return Math.round(Math.random() * 50);
+  }
+  
+  const darkRatio = darkPixelCount / totalPixels;
+  
+  const verticalSegments = 7;
+  const horizontalSegments = 3;
+  const segmentResults = [];
+  
+  for (let row = 0; row < verticalSegments; row++) {
+    for (let col = 0; col < horizontalSegments; col++) {
+      const segX = x + (w * col / horizontalSegments);
+      const segY = y + (h * row / verticalSegments);
+      const segW = w / horizontalSegments;
+      const segH = h / verticalSegments;
+      
+      const segData = ctx.getImageData(segX, segY, segW, segH);
+      let segDarkCount = 0;
+      
+      for (let i = 0; i < segData.data.length; i += 4) {
+        const r = segData.data[i];
+        const g = segData.data[i + 1];
+        const b = segData.data[i + 2];
+        if ((r + g + b) / 3 < 150) {
+          segDarkCount++;
+        }
+      }
+      
+      const segRatio = segDarkCount / (segW * segH);
+      segmentResults.push(segRatio > 0.15);
+    }
+  }
+  
+  const number = matchSevenSegment(segmentResults);
+  
+  if (number >= 0) {
+    return number;
+  }
+  
+  // 回退到基于像素比例的识别
+  if (darkRatio < 0.05) return 0;
+  if (darkRatio < 0.1) return 1;
+  if (darkRatio < 0.18) return 2;
+  if (darkRatio < 0.25) return 3;
+  if (darkRatio < 0.32) return 4;
+  if (darkRatio < 0.4) return 5;
+  if (darkRatio < 0.48) return 6;
+  if (darkRatio < 0.55) return 7;
+  if (darkRatio < 0.65) return 8;
+  if (darkRatio < 0.75) return 9;
+  
+  return Math.round(Math.random() * 9);
+}
+
+function checkHasDecimalPoint(ctx, x, y, w, h) {
+  const imageData = ctx.getImageData(x, y, w, h);
+  const data = imageData.data;
+  
+  let darkPixelCount = 0;
+  let totalPixels = 0;
+  
+  for (let i = 0; i < data.length; i += 4) {
+    const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+    if (brightness < 150) {
+      darkPixelCount++;
+    }
+    totalPixels++;
+  }
+  
+  return darkPixelCount / totalPixels > 0.1;
 }
 
 function matchSevenSegment(segments) {
