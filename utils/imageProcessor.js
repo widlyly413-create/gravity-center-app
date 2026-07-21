@@ -11,26 +11,53 @@ const REGIONS = {
   sensor4: { x1: 650, x2: 950, y1: 340, y2: 475 }
 };
 
-// 等待 OpenCV.js 加载
+// 等待 OpenCV.js 加载（带超时机制）
 function waitForOpenCV() {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     if (window.cv && window.cvReady) {
+      console.log('✓ OpenCV.js 已预加载');
       resolve();
-    } else {
-      const check = setInterval(() => {
-        if (window.cv && window.cvReady) {
-          clearInterval(check);
-          resolve();
-        }
-      }, 100);
+      return;
     }
+
+    console.log('⏳ 等待 OpenCV.js 加载...');
+    let attempts = 0;
+    const maxAttempts = 100; // 最多等待10秒（100 * 100ms）
+    
+    const check = setInterval(() => {
+      attempts++;
+      
+      if (window.cv && window.cvReady) {
+        clearInterval(check);
+        console.log('✓ OpenCV.js 加载成功');
+        resolve();
+      } else if (attempts >= maxAttempts) {
+        clearInterval(check);
+        const errorMsg = '❌ OpenCV.js 加载超时，请检查网络连接或刷新页面';
+        console.error(errorMsg);
+        reject(new Error(errorMsg));
+      } else if (attempts % 10 === 0) {
+        console.log(`⏳ OpenCV.js 加载中... (${attempts * 100}ms)`);
+      }
+    }, 100);
   });
 }
 
 export async function processImage(file) {
   return new Promise(async (resolve) => {
     // 等待 OpenCV.js 加载完成
-    await waitForOpenCV();
+    try {
+      await waitForOpenCV();
+    } catch (error) {
+      console.error('OpenCV.js 加载失败:', error);
+      resolve({
+        success: false,
+        error: error.message,
+        w1: 0, w2: 0, w3: 0, w4: 0,
+        productCode: ""
+      });
+      return;
+    }
     console.log('✓ OpenCV.js 已加载');
     
     const img = new Image();
