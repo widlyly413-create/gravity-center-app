@@ -168,6 +168,9 @@ function extractReadingsFromImage(img) {
 
 // ==================== 蓝色掩膜检测（与本地测试脚本一致） ====================
 function detectScreenByBlueMask(img, width, height) {
+  console.log(`\n=== 蓝色掩膜检测开始 ===`);
+  console.log(`图片尺寸: ${width} x ${height}`);
+  
   const tempCanvas = document.createElement('canvas');
   tempCanvas.width = width;
   tempCanvas.height = height;
@@ -177,8 +180,16 @@ function detectScreenByBlueMask(img, width, height) {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
   
-  // 创建蓝色掩膜
+  // 创建蓝色掩膜（尝试多种蓝色范围）
   const blueMask = new Uint8ClampedArray(width * height);
+  let bluePixelCount = 0;
+  
+  // 定义多个蓝色范围，增加检测鲁棒性
+  const blueRanges = [
+    { hMin: 90, hMax: 130, sMin: 50, vMin: 50 },   // 标准蓝色
+    { hMin: 75, hMax: 145, sMin: 30, vMin: 30 },   // 宽松蓝色
+    { hMin: 85, hMax: 135, sMin: 40, vMin: 40 }    // 中等蓝色
+  ];
   
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -188,26 +199,48 @@ function detectScreenByBlueMask(img, width, height) {
       const b = data[i + 2];
       
       const [h, s, v] = rgbToHsv(r, g, b);
-      // 蓝色范围: H 90-130, S >= 50, V >= 50
-      if (h >= 90 && h <= 130 && s >= 50 && v >= 50) {
+      
+      // 检查是否在任一蓝色范围内
+      let isBlue = false;
+      for (const range of blueRanges) {
+        if (h >= range.hMin && h <= range.hMax && s >= range.sMin && v >= range.vMin) {
+          isBlue = true;
+          break;
+        }
+      }
+      
+      if (isBlue) {
         blueMask[y * width + x] = 255;
+        bluePixelCount++;
       }
     }
   }
   
+  const blueRatio = (bluePixelCount / (width * height)) * 100;
+  console.log(`蓝色像素数: ${bluePixelCount} (占比 ${blueRatio.toFixed(2)}%)`);
+  
+  if (bluePixelCount === 0) {
+    console.log("❌ 未检测到蓝色区域");
+    return null;
+  }
+  
   // 形态学闭运算（填充空洞）- 与本地测试一致使用30x30核
+  console.log("执行形态学闭运算 (30x30核)...");
   const closedMask = applyMorphologicalClose(blueMask, width, height, 30);
+  
+  // 统计闭运算后的白色像素
+  let closedWhiteCount = 0;
+  for (let i = 0; i < closedMask.length; i++) {
+    if (closedMask[i] > 0) closedWhiteCount++;
+  }
+  const closedRatio = (closedWhiteCount / (width * height)) * 100;
+  console.log(`闭运算后白色像素数: ${closedWhiteCount} (占比 ${closedRatio.toFixed(2)}%)`);
   
   // 寻找轮廓
   const contours = findContours(closedMask, width, height);
   if (contours.length === 0) {
-    console.log("⚠️ 未找到轮廓，使用保底坐标");
-    return orderPoints([
-      { x: 350, y: 264 },
-      { x: 1186, y: 264 },
-      { x: 1182, y: 595 },
-      { x: 353, y: 595 }
-    ]);
+    console.log("⚠️ 未找到轮廓");
+    return null;
   }
   
   // 找到最大轮廓
@@ -233,9 +266,14 @@ function detectScreenByBlueMask(img, width, height) {
     }
   }
   
-  // 无法获取4个角点，返回失败
-  console.log("⚠️ 无法获取4个角点，返回失败");
-  return null;
+  // 无法获取4个角点，使用保底坐标
+  console.log("⚠️ 无法获取4个角点，使用保底坐标");
+  return orderPoints([
+    { x: 350, y: 264 },
+    { x: 1186, y: 264 },
+    { x: 1182, y: 595 },
+    { x: 353, y: 595 }
+  ]);
 }
 
 // ==================== 颜色判断 ====================
@@ -332,6 +370,7 @@ function applyMorphologicalClose(mask, width, height, kernelSize) {
 function findContours(mask, width, height) {
   const visited = new Uint8ClampedArray(mask.length);
   const contours = [];
+  let totalContoursFound = 0;
   
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -355,13 +394,16 @@ function findContours(mask, width, height) {
           stack.push({ x: cx, y: cy - 1 });
         }
         
-        if (contour.length > 100) {
+        totalContoursFound++;
+        // 降低阈值，允许更小的轮廓
+        if (contour.length > 50) {
           contours.push(contour);
         }
       }
     }
   }
   
+  console.log(`轮廓检测: 共发现 ${totalContoursFound} 个轮廓，保存 ${contours.length} 个有效轮廓`);
   return contours;
 }
 
