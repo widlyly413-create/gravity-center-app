@@ -687,9 +687,7 @@ async function recognizeNumberInRegion(ctx, region) {
     
     // 使用 Tesseract 进行 OCR
     const { createWorker } = Tesseract;
-    const worker = await createWorker({
-      logger: m => console.log(`Tesseract: ${m.status}`)
-    });
+    const worker = await createWorker();
     
     await worker.load();
     await worker.loadLanguage('eng');
@@ -862,9 +860,7 @@ function detectDecimalPointFallback(ctx, x, y, w, h) {
 async function recognizeProductCodeFromLabel(ctx, width, height) {
   try {
     const { createWorker } = Tesseract;
-    const worker = await createWorker({
-      logger: m => console.log(`Tesseract (产品编号): ${m.status}`)
-    });
+    const worker = await createWorker();
     
     await worker.load();
     await worker.loadLanguage('eng');
