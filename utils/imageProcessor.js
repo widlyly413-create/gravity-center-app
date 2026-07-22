@@ -637,14 +637,20 @@ async function recognizeNumberInRegion(ctx, region) {
     const processedCanvas = preprocessImageForOCR(regionCanvas);
     
     const { createWorker } = Tesseract;
-    const worker = await createWorker('eng', 'https://tessdata.projectnaptha.com/4.0.0');
+    const worker = await createWorker({
+      logger: () => {},
+    });
     
-    const { data: { text } } = await worker.recognize(processedCanvas, {
+    await worker.loadLanguage('eng');
+    await worker.initialize('eng');
+    
+    await worker.setParameters({
       tessedit_char_whitelist: '0123456789.',
       tessedit_pageseg_mode: '7',
       user_defined_dpi: '300',
     });
     
+    const { data: { text } } = await worker.recognize(processedCanvas);
     await worker.terminate();
     
     const cleanedText = text.trim().replace(/[^0-9.]/g, '');
@@ -843,14 +849,20 @@ async function recognizeProductCodeFromLabel(ctx, width, height) {
     const processedCanvas = preprocessImageForOCR(ctx.canvas, false);
     
     const { createWorker } = Tesseract;
-    const worker = await createWorker('eng', 'https://tessdata.projectnaptha.com/4.0.0');
+    const worker = await createWorker({
+      logger: () => {},
+    });
     
-    const { data: { text } } = await worker.recognize(processedCanvas, {
+    await worker.loadLanguage('eng');
+    await worker.initialize('eng');
+    
+    await worker.setParameters({
       tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
       tessedit_pageseg_mode: '7',
       user_defined_dpi: '300',
     });
     
+    const { data: { text } } = await worker.recognize(processedCanvas);
     await worker.terminate();
     
     const cleanedText = text.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
