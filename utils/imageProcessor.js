@@ -196,43 +196,41 @@ function findClosestToCorner(arr1, arr2, corner) {
 function detectScreen(ctx, w, h) {
   const data = ctx.getImageData(0, 0, w, h).data;
   
-  const bluePoints = [];
+  let minX = w, minY = h, maxX = 0, maxY = 0;
+  let blueCount = 0;
   
+  let minSum = Infinity, maxSum = -Infinity;
+  let minDiff = Infinity, maxDiff = -Infinity;
+  let tl = { x: 0, y: 0 }, tr = { x: 0, y: 0 };
+  let bl = { x: 0, y: 0 }, br = { x: 0, y: 0 };
+
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
       const r = data[i], g = data[i + 1], b = data[i + 2];
       if (b > 80 && b > r * 1.2 && b > g * 1.1) {
-        bluePoints.push({ x, y });
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+        blueCount++;
+        
+        const sum = x + y;
+        const diff = x - y;
+        
+        if (sum < minSum) { minSum = sum; tl = { x, y }; }
+        if (sum > maxSum) { maxSum = sum; br = { x, y }; }
+        if (diff > maxDiff) { maxDiff = diff; tr = { x, y }; }
+        if (diff < minDiff) { minDiff = diff; bl = { x, y }; }
       }
     }
   }
 
-  console.log(`蓝色像素数: ${bluePoints.length}`);
+  console.log(`蓝色像素数: ${blueCount}`);
   
-  if (bluePoints.length < 1000) {
+  if (maxX - minX < 100 || maxY - minY < 100 || blueCount < 1000) {
     return null;
   }
-
-  let minX = w, minY = h, maxX = 0, maxY = 0;
-  for (const p of bluePoints) {
-    minX = Math.min(minX, p.x);
-    maxX = Math.max(maxX, p.x);
-    minY = Math.min(minY, p.y);
-    maxY = Math.max(maxY, p.y);
-  }
-
-  if (maxX - minX < 100 || maxY - minY < 100) {
-    return null;
-  }
-
-  const s = bluePoints.map(p => p.x + p.y);
-  const diff = bluePoints.map(p => p.x - p.y);
-  
-  const tl = bluePoints[s.indexOf(Math.min(...s))];
-  const br = bluePoints[s.indexOf(Math.max(...s))];
-  const tr = bluePoints[diff.indexOf(Math.max(...diff))];
-  const bl = bluePoints[diff.indexOf(Math.min(...diff))];
 
   return [tl, tr, br, bl];
 }
