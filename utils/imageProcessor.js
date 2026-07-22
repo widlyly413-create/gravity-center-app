@@ -162,14 +162,15 @@ function detectScreenByEdge(ctx, width, height) {
   return null;
 }
 
-// ==================== 纯 JS 蓝色掩膜检测 ====================
+// ==================== 纯 JS 蓝色掩膜检测（增强版） ====================
 function detectScreenByBlueMask(ctx, width, height) {
   console.log(`\n=== 纯 JS 蓝色掩膜检测开始 ===`);
   
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
   
-  const bluePixels = [];
+  // 创建蓝色掩膜（单通道）
+  const blueMask = new Uint8ClampedArray(width * height);
   
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -178,46 +179,291 @@ function detectScreenByBlueMask(ctx, width, height) {
       const g = data[i + 1];
       const b = data[i + 2];
       
-      if (isBlue(r, g, b)) {
-        bluePixels.push({ x, y });
+      blueMask[y * width + x] = isBlue(r, g, b) ? 255 : 0;
+    }
+  }
+  
+  const bluePixelCount = blueMask.reduce((sum, val) => sum + (val > 0 ? 1 : 0), 0);
+  console.log(`检测到 ${bluePixelCount} 个蓝色像素`);
+  
+  if (bluePixelCount < 100) {
+    return null;
+  }
+  
+  // 形态学闭运算（膨胀+腐蚀）
+  const closedMask = applyMorphologicalClose(blueMask, width, height, 20);
+  console.log(`✓ 形态学闭运算完成`);
+  
+  // 寻找轮廓
+  const contours = findContours(closedMask, width, height);
+  console.log(`✓ 轮廓检测完成，找到 ${contours.length} 个轮廓`);
+  
+  if (contours.length === 0) {
+    return null;
+  }
+  
+  // 找到最大轮廓
+  let maxArea = 0;
+  let largestContour = null;
+  for (const contour of contours) {
+    const area = calculateContourArea(contour);
+    if (area > maxArea) {
+      maxArea = area;
+      largestContour = contour;
+    }
+  }
+  
+  if (!largestContour || largestContour.length < 4) {
+    console.log('❌ 未找到有效轮廓');
+    return null;
+  }
+  
+  console.log(`最大轮廓面积: ${maxArea}, 点数: ${largestContour.length}`);
+  
+  // 多边形逼近获取角点
+  const approx = approximatePolygon(largestContour, 0.02);
+  console.log(`多边形逼近后点数: ${approx.length}`);
+  
+  if (approx.length !== 4) {
+    console.log('⚠️ 未获取到4个角点，尝试调整容差');
+    
+    for (const tolerance of [0.03, 0.04, 0.05, 0.06]) {
+      const tempApprox = approximatePolygon(largestContour, tolerance);
+      if (tempApprox.length === 4) {
+        console.log(`✓ 使用容差 ${tolerance} 成功获取4个角点`);
+        return orderPoints(tempApprox);
+      }
+    }
+    
+    console.log('❌ 无法获取4个角点，使用边界框兜底');
+    
+    // 使用边界框兜底
+    let minX = width, maxX = 0, minY = height, maxY = 0;
+    for (const pt of largestContour) {
+      minX = Math.min(minX, pt.x);
+      maxX = Math.max(maxX, pt.x);
+      minY = Math.min(minY, pt.y);
+      maxY = Math.max(maxY, pt.y);
+    }
+    
+    return [
+      { x: minX, y: minY },
+      { x: maxX, y: minY },
+      { x: maxX, y: maxY },
+      { x: minX, y: maxY }
+    ];
+  }
+  
+  // 排序角点
+  return orderPoints(approx);
+}
+
+// 形态学闭运算（膨胀+腐蚀）
+function applyMorphologicalClose(mask, width, height, kernelSize) {
+  const halfKernel = Math.floor(kernelSize / 2);
+  const result = new Uint8ClampedArray(mask.length);
+  
+  // 膨胀
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let hasWhite = false;
+      for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+          const ny = y + ky;
+          const nx = x + kx;
+          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+            if (mask[ny * width + nx] > 0) {
+              hasWhite = true;
+              break;
+            }
+          }
+        }
+        if (hasWhite) break;
+      }
+      result[y * width + x] = hasWhite ? 255 : 0;
+    }
+  }
+  
+  // 腐蚀
+  const finalResult = new Uint8ClampedArray(mask.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let allWhite = true;
+      for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+          const ny = y + ky;
+          const nx = x + kx;
+          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+            if (result[ny * width + nx] === 0) {
+              allWhite = false;
+              break;
+            }
+          } else {
+            allWhite = false;
+            break;
+          }
+        }
+        if (!allWhite) break;
+      }
+      finalResult[y * width + x] = allWhite ? 255 : 0;
+    }
+  }
+  
+  return finalResult;
+}
+
+// 轮廓检测
+function findContours(mask, width, height) {
+  const visited = new Uint8ClampedArray(mask.length);
+  const contours = [];
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (mask[y * width + x] > 0 && visited[y * width + x] === 0) {
+        const contour = [];
+        const stack = [{ x, y }];
+        
+        while (stack.length > 0) {
+          const { x: cx, y: cy } = stack.pop();
+          const idx = cy * width + cx;
+          
+          if (cx < 0 || cx >= width || cy < 0 || cy >= height) continue;
+          if (mask[idx] === 0 || visited[idx] === 1) continue;
+          
+          visited[idx] = 1;
+          contour.push({ x: cx, y: cy });
+          
+          stack.push({ x: cx + 1, y: cy });
+          stack.push({ x: cx - 1, y: cy });
+          stack.push({ x: cx, y: cy + 1 });
+          stack.push({ x: cx, y: cy - 1 });
+        }
+        
+        if (contour.length > 50) {
+          contours.push(contour);
+        }
       }
     }
   }
   
-  console.log(`检测到 ${bluePixels.length} 个蓝色像素`);
+  return contours;
+}
+
+// 计算轮廓面积
+function calculateContourArea(contour) {
+  if (contour.length < 3) return 0;
   
-  if (bluePixels.length < 100) {
-    return null;
+  let area = 0;
+  const n = contour.length;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    area += contour[i].x * contour[j].y;
+    area -= contour[j].x * contour[i].y;
   }
   
-  // 找到蓝色区域的边界框
-  let minX = width, maxX = 0, minY = height, maxY = 0;
-  for (const pt of bluePixels) {
-    minX = Math.min(minX, pt.x);
-    maxX = Math.max(maxX, pt.x);
-    minY = Math.min(minY, pt.y);
-    maxY = Math.max(maxY, pt.y);
+  return Math.abs(area / 2);
+}
+
+// 计算周长
+function calculatePerimeter(contour) {
+  let perimeter = 0;
+  for (let i = 0; i < contour.length; i++) {
+    const j = (i + 1) % contour.length;
+    const dx = contour[j].x - contour[i].x;
+    const dy = contour[j].y - contour[i].y;
+    perimeter += Math.sqrt(dx * dx + dy * dy);
   }
+  return perimeter;
+}
+
+// 多边形逼近（Ramer-Douglas-Peucker算法）
+function approximatePolygon(contour, tolerance) {
+  if (contour.length < 3) return contour;
   
-  const detectedWidth = maxX - minX;
-  const detectedHeight = maxY - minY;
+  const perimeter = calculatePerimeter(contour);
+  const epsilon = tolerance * perimeter;
   
-  if (detectedWidth > 0 && detectedHeight > 0) {
-    const ratio = detectedWidth / detectedHeight;
-    const tolerance = 0.3;
-    
-    if (Math.abs(ratio - TARGET_RATIO) < tolerance) {
-      console.log(`✓ 找到符合比例的蓝色区域！宽高比: ${ratio.toFixed(3)}`);
-      return [
-        { x: minX, y: minY },
-        { x: maxX, y: minY },
-        { x: maxX, y: maxY },
-        { x: minX, y: maxY }
-      ];
+  return ramerDouglasPeucker(contour, epsilon);
+}
+
+// Ramer-Douglas-Peucker算法实现
+function ramerDouglasPeucker(points, epsilon) {
+  if (points.length <= 2) return points;
+  
+  let maxDist = 0;
+  let index = 0;
+  const start = points[0];
+  const end = points[points.length - 1];
+  
+  for (let i = 1; i < points.length - 1; i++) {
+    const dist = pointToLineDistance(points[i], start, end);
+    if (dist > maxDist) {
+      maxDist = dist;
+      index = i;
     }
   }
   
-  return null;
+  if (maxDist > epsilon) {
+    const left = ramerDouglasPeucker(points.slice(0, index + 1), epsilon);
+    const right = ramerDouglasPeucker(points.slice(index), epsilon);
+    return left.slice(0, -1).concat(right);
+  } else {
+    return [start, end];
+  }
+}
+
+// 点到线距离
+function pointToLineDistance(point, lineStart, lineEnd) {
+  const A = point.x - lineStart.x;
+  const B = point.y - lineStart.y;
+  const C = lineEnd.x - lineStart.x;
+  const D = lineEnd.y - lineStart.y;
+  
+  const dot = A * C + B * D;
+  const lenSq = C * C + D * D;
+  let param = -1;
+  
+  if (lenSq !== 0) param = dot / lenSq;
+  
+  let xx, yy;
+  
+  if (param < 0) {
+    xx = lineStart.x;
+    yy = lineStart.y;
+  } else if (param > 1) {
+    xx = lineEnd.x;
+    yy = lineEnd.y;
+  } else {
+    xx = lineStart.x + param * C;
+    yy = lineStart.y + param * D;
+  }
+  
+  const dx = point.x - xx;
+  const dy = point.y - yy;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// 角点排序（左上、右上、右下、左下）
+function orderPoints(pts) {
+  const rect = [{}, {}, {}, {}];
+  
+  const sums = pts.map(p => p.x + p.y);
+  const minSumIdx = sums.indexOf(Math.min(...sums));
+  const maxSumIdx = sums.indexOf(Math.max(...sums));
+  
+  rect[0] = pts[minSumIdx];
+  rect[2] = pts[maxSumIdx];
+  
+  const diffs = pts.map(p => p.x - p.y);
+  const maxDiffIdx = diffs.indexOf(Math.max(...diffs));
+  const minDiffIdx = diffs.indexOf(Math.min(...diffs));
+  
+  rect[1] = pts[maxDiffIdx];
+  rect[3] = pts[minDiffIdx];
+  
+  console.log(`角点排序完成: TL(${rect[0].x},${rect[0].y}) TR(${rect[1].x},${rect[1].y}) BR(${rect[2].x},${rect[2].y}) BL(${rect[3].x},${rect[3].y})`);
+  
+  return rect;
 }
 
 // ==================== 几何兜底：获取图片中心的标准比例框 ====================
@@ -304,7 +550,11 @@ function extractReadingsFromPerspectiveImage(screenCtx) {
     
     let cog = 0;
     if (totalWeight > 0) {
-      cog = ((readings["#3"] + readings["#4"]) / totalWeight) * 150;
+      const leftWeight = readings["#1"] + readings["#3"];
+      const rightWeight = readings["#2"] + readings["#4"];
+      cog = (rightWeight / totalWeight) * 150;
+      console.log(`重心计算: #1=${readings["#1"].toFixed(2)} #2=${readings["#2"].toFixed(2)} #3=${readings["#3"].toFixed(2)} #4=${readings["#4"].toFixed(2)}`);
+      console.log(`总重量=${totalWeight.toFixed(2)}, 左侧=${leftWeight.toFixed(2)}, 右侧=${rightWeight.toFixed(2)}, 重心=${cog.toFixed(4)}`);
     }
     
     return {
