@@ -497,123 +497,21 @@ function applyPerspectiveTransform(ctx, img, M, width, height) {
   ctx.putImageData(imageData, 0, 0);
 }
 
-// ==================== 数字识别 ====================
+// ==================== 数字识别（简化版本） ====================
 function recognizeNumberInRegion(ctx, region) {
   try {
     const { x1, x2, y1, y2 } = region;
     const w = x2 - x1;
     const h = y2 - y1;
     
-    return recognizeNumberWithDecimal(ctx, x1, y1, w, h);
+    return recognizeSimpleNumber(ctx, x1, y1, w, h);
   } catch (error) {
     console.error('数字识别错误:', error);
     return Math.round(Math.random() * 50);
   }
 }
 
-function recognizeNumberWithDecimal(ctx, x, y, w, h) {
-  const intWidth = Math.floor(w * 0.55);
-  const decimalWidth = w - intWidth;
-  
-  const intNumber = recognizeSingleDigitGroup(ctx, x, y, intWidth, h);
-  
-  const dotRegionX = x + intWidth;
-  const dotRegionY = y + h * 0.3;
-  const dotRegionW = Math.floor(w * 0.1);
-  const dotRegionH = Math.floor(h * 0.4);
-  
-  const hasDot = checkHasDecimalPoint(ctx, dotRegionX, dotRegionY, dotRegionW, dotRegionH);
-  
-  let decimalPart = 0;
-  if (hasDot && decimalWidth > 10) {
-    const decimalNumber = recognizeSingleDigitGroup(ctx, x + intWidth + dotRegionW, y, decimalWidth - dotRegionW, h);
-    decimalPart = decimalNumber / 10;
-  }
-  
-  return intNumber + decimalPart;
-}
-
-function recognizeSingleDigitGroup(ctx, x, y, w, h) {
-  const imageData = ctx.getImageData(x, y, w, h);
-  const data = imageData.data;
-  
-  let darkPixelCount = 0;
-  let totalPixels = 0;
-  let maxBrightness = 0;
-  let minBrightness = 255;
-  
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    
-    const brightness = (r + g + b) / 3;
-    maxBrightness = Math.max(maxBrightness, brightness);
-    minBrightness = Math.min(minBrightness, brightness);
-    
-    if (brightness < 150) {
-      darkPixelCount++;
-    }
-    totalPixels++;
-  }
-  
-  const contrast = maxBrightness - minBrightness;
-  
-  if (contrast < 30) {
-    return Math.round(Math.random() * 50);
-  }
-  
-  const darkRatio = darkPixelCount / totalPixels;
-  
-  const verticalSegments = 7;
-  const horizontalSegments = 3;
-  const segmentResults = [];
-  
-  for (let row = 0; row < verticalSegments; row++) {
-    for (let col = 0; col < horizontalSegments; col++) {
-      const segX = x + (w * col / horizontalSegments);
-      const segY = y + (h * row / verticalSegments);
-      const segW = w / horizontalSegments;
-      const segH = h / verticalSegments;
-      
-      const segData = ctx.getImageData(segX, segY, segW, segH);
-      let segDarkCount = 0;
-      
-      for (let i = 0; i < segData.data.length; i += 4) {
-        const r = segData.data[i];
-        const g = segData.data[i + 1];
-        const b = segData.data[i + 2];
-        if ((r + g + b) / 3 < 150) {
-          segDarkCount++;
-        }
-      }
-      
-      const segRatio = segDarkCount / (segW * segH);
-      segmentResults.push(segRatio > 0.15);
-    }
-  }
-  
-  const number = matchSevenSegment(segmentResults);
-  
-  if (number >= 0) {
-    return number;
-  }
-  
-  if (darkRatio < 0.05) return 0;
-  if (darkRatio < 0.1) return 1;
-  if (darkRatio < 0.18) return 2;
-  if (darkRatio < 0.25) return 3;
-  if (darkRatio < 0.32) return 4;
-  if (darkRatio < 0.4) return 5;
-  if (darkRatio < 0.48) return 6;
-  if (darkRatio < 0.55) return 7;
-  if (darkRatio < 0.65) return 8;
-  if (darkRatio < 0.75) return 9;
-  
-  return Math.round(Math.random() * 9);
-}
-
-function checkHasDecimalPoint(ctx, x, y, w, h) {
+function recognizeSimpleNumber(ctx, x, y, w, h) {
   const imageData = ctx.getImageData(x, y, w, h);
   const data = imageData.data;
   
@@ -628,46 +526,45 @@ function checkHasDecimalPoint(ctx, x, y, w, h) {
     totalPixels++;
   }
   
-  return darkPixelCount / totalPixels > 0.1;
+  const darkRatio = darkPixelCount / totalPixels;
+  
+  const hasDecimal = checkDecimalPoint(ctx, x, y, w, h);
+  
+  const number = recognizeNumberByPixelRatio(darkRatio);
+  
+  return hasDecimal ? number + 0.5 : number;
 }
 
-function matchSevenSegment(segments) {
-  if (segments.length !== 21) return -1;
+function checkDecimalPoint(ctx, x, y, w, h) {
+  const dotX = x + Math.floor(w * 0.65);
+  const dotY = y + Math.floor(h * 0.4);
+  const dotW = Math.floor(w * 0.08);
+  const dotH = Math.floor(h * 0.25);
   
-  const patterns = {
-    0: [true, true, true, true, true, true, false],
-    1: [false, true, true, false, false, false, false],
-    2: [true, true, false, true, true, false, true],
-    3: [true, true, true, true, false, false, true],
-    4: [false, true, true, false, false, true, true],
-    5: [true, false, true, true, false, true, true],
-    6: [true, false, true, true, true, true, true],
-    7: [true, true, true, false, false, false, false],
-    8: [true, true, true, true, true, true, true],
-    9: [true, true, true, true, false, true, true]
-  };
+  const imageData = ctx.getImageData(dotX, dotY, dotW, dotH);
+  const data = imageData.data;
   
-  const avgSegments = [];
-  for (let i = 0; i < 7; i++) {
-    let sum = 0;
-    for (let j = 0; j < 3; j++) {
-      sum += segments[i * 3 + j] ? 1 : 0;
+  let dark = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if ((data[i] + data[i + 1] + data[i + 2]) / 3 < 150) {
+      dark++;
     }
-    avgSegments.push(sum >= 2);
   }
   
-  for (const [num, pattern] of Object.entries(patterns)) {
-    let match = true;
-    for (let i = 0; i < 7; i++) {
-      if (avgSegments[i] !== pattern[i]) {
-        match = false;
-        break;
-      }
-    }
-    if (match) return parseInt(num);
-  }
-  
-  return -1;
+  return dark / (data.length / 4) > 0.12;
+}
+
+function recognizeNumberByPixelRatio(darkRatio) {
+  if (darkRatio < 0.08) return 0;
+  if (darkRatio < 0.15) return 1;
+  if (darkRatio < 0.22) return 2;
+  if (darkRatio < 0.28) return 3;
+  if (darkRatio < 0.35) return 4;
+  if (darkRatio < 0.42) return 5;
+  if (darkRatio < 0.48) return 6;
+  if (darkRatio < 0.54) return 7;
+  if (darkRatio < 0.62) return 8;
+  return 9;
 }
 
 // ==================== 产品编号识别 ====================
