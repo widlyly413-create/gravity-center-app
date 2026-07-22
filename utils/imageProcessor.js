@@ -337,14 +337,30 @@ function createBinary(canvas) {
   const img = ctx.getImageData(0, 0, out.width, out.height);
   const d = img.data;
 
-  const grays = [];
+  let sum = 0, count = 0;
   for (let i = 0; i < d.length; i += 4) {
     const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    grays.push(gray);
+    sum += gray;
+    count++;
   }
-  
-  grays.sort((a, b) => a - b);
-  const threshold = grays[Math.floor(grays.length * 0.7)];
+  const avg = sum / count;
+
+  let highSum = 0, highCount = 0;
+  let lowSum = 0, lowCount = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    if (gray > avg) {
+      highSum += gray;
+      highCount++;
+    } else {
+      lowSum += gray;
+      lowCount++;
+    }
+  }
+
+  const highAvg = highCount > 0 ? highSum / highCount : 200;
+  const lowAvg = lowCount > 0 ? lowSum / lowCount : 50;
+  const threshold = (highAvg + lowAvg) / 2;
 
   for (let i = 0; i < d.length; i += 4) {
     const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
@@ -362,8 +378,9 @@ function segmentCharacters(canvas) {
   const d = img.data;
   
   const cols = [];
-  const minRow = Math.floor(canvas.height * 0.05);
-  const maxRow = Math.floor(canvas.height * 0.95);
+  const minRow = Math.floor(canvas.height * 0.1);
+  const maxRow = Math.floor(canvas.height * 0.9);
+  const rowHeight = maxRow - minRow;
 
   for (let x = 0; x < canvas.width; x++) {
     let count = 0;
@@ -373,21 +390,26 @@ function segmentCharacters(canvas) {
     cols.push(count);
   }
 
+  let maxCol = 0;
+  for (let i = 0; i < cols.length; i++) {
+    maxCol = Math.max(maxCol, cols[i]);
+  }
+
   const charRegions = [];
   let inChar = false;
   let startX = 0;
-  const minHeight = (maxRow - minRow) * 0.1;
+  const threshold = rowHeight * 0.15;
 
   for (let i = 0; i < cols.length; i++) {
-    const hasContent = cols[i] > minHeight;
+    const hasContent = cols[i] > threshold && cols[i] > maxCol * 0.1;
     
     if (hasContent && !inChar) {
       inChar = true;
-      startX = i;
+      startX = Math.max(0, i - 1);
     } else if (!hasContent && inChar) {
       inChar = false;
       const charWidth = i - startX;
-      if (charWidth > 3 && charWidth < canvas.width * 0.5) {
+      if (charWidth > 5 && charWidth < canvas.width * 0.4) {
         charRegions.push({ start: startX, end: i });
       }
     }
@@ -395,7 +417,7 @@ function segmentCharacters(canvas) {
 
   if (inChar) {
     const charWidth = cols.length - startX;
-    if (charWidth > 3) {
+    if (charWidth > 5) {
       charRegions.push({ start: startX, end: cols.length });
     }
   }
@@ -414,9 +436,10 @@ function recognizeDigit(canvas) {
   const width = canvas.width;
   const height = canvas.height;
 
-  if (width < 5 || height < 8) {
+  if (width < 8 || height < 15) {
     const isDot = checkIsDot(canvas);
-    return isDot ? "." : "";
+    if (isDot) return ".";
+    return recognizeSmallDigit(canvas);
   }
 
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -429,6 +452,47 @@ function recognizeDigit(canvas) {
   if (digit) return digit;
 
   return recognizeByPattern(canvas);
+}
+
+function recognizeSmallDigit(canvas) {
+  const width = canvas.width;
+  const height = canvas.height;
+  
+  if (width < 5 || height < 8) return "";
+  
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const img = ctx.getImageData(0, 0, width, height);
+  const d = img.data;
+  
+  let whiteCount = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i] > 128) whiteCount++;
+  }
+  
+  const ratio = whiteCount / (width * height);
+  
+  if (ratio < 0.15) return "";
+  if (ratio > 0.7) return "0";
+  
+  let centerY = Math.floor(height / 2);
+  let topWhite = 0, bottomWhite = 0;
+  
+  for (let y = 0; y < centerY; y++) {
+    for (let x = 0; x < width; x++) {
+      if (d[(y * width + x) * 4] > 128) topWhite++;
+    }
+  }
+  
+  for (let y = centerY; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (d[(y * width + x) * 4] > 128) bottomWhite++;
+    }
+  }
+  
+  if (topWhite < bottomWhite * 0.3) return "1";
+  if (ratio > 0.5) return "8";
+  
+  return "";
 }
 
 function checkIsDot(canvas) {
@@ -457,13 +521,13 @@ function checkIsDot(canvas) {
 
 function detectSegments(data, width, height) {
   const seg = {
-    a: checkSegmentArea(data, width, height, 0.15, 0.02, 0.7, 0.12),
-    b: checkSegmentArea(data, width, height, 0.75, 0.05, 0.2, 0.42),
-    c: checkSegmentArea(data, width, height, 0.75, 0.52, 0.2, 0.42),
-    d: checkSegmentArea(data, width, height, 0.15, 0.82, 0.7, 0.15),
-    e: checkSegmentArea(data, width, height, 0.02, 0.52, 0.2, 0.42),
-    f: checkSegmentArea(data, width, height, 0.02, 0.05, 0.2, 0.42),
-    g: checkSegmentArea(data, width, height, 0.15, 0.45, 0.7, 0.12)
+    a: checkSegmentArea(data, width, height, 0.12, 0.02, 0.76, 0.14),
+    b: checkSegmentArea(data, width, height, 0.72, 0.04, 0.24, 0.40),
+    c: checkSegmentArea(data, width, height, 0.72, 0.52, 0.24, 0.40),
+    d: checkSegmentArea(data, width, height, 0.12, 0.80, 0.76, 0.16),
+    e: checkSegmentArea(data, width, height, 0.04, 0.52, 0.24, 0.40),
+    f: checkSegmentArea(data, width, height, 0.04, 0.04, 0.24, 0.40),
+    g: checkSegmentArea(data, width, height, 0.12, 0.44, 0.76, 0.14)
   };
   
   return seg;
@@ -482,13 +546,16 @@ function checkSegmentArea(data, width, height, px, py, pw, ph) {
     for (let x = startX; x < endX; x++) {
       if (y >= 0 && y < height && x >= 0 && x < width) {
         const i = (y * width + x) * 4;
-        if (data[i] > 128) white++;
+        if (data[i] > 180) white++;
         total++;
       }
     }
   }
   
-  return total > 0 && (white / total) > 0.4;
+  if (total < 4) return false;
+  const ratio = white / total;
+  
+  return ratio > 0.35;
 }
 
 function matchBySegments(seg) {
