@@ -1,1090 +1,1050 @@
-// 固定目标尺寸（与本地测试脚本一致）
 const TARGET_WIDTH = 1030;
 const TARGET_HEIGHT = 590;
-const TARGET_RATIO = TARGET_WIDTH / TARGET_HEIGHT;
 
 const REGIONS = {
   productCode: {
-    x1: 285,
-    x2: 430,
-    y1: 55,
-    y2: 120
+    x1: 280,
+    x2: 440,
+    y1: 45,
+    y2: 130
   },
 
   sensor1: {
-    x1: 300,
+    x1: 310,
     x2: 540,
-    y1: 170,
-    y2: 330
+    y1: 180,
+    y2: 320
   },
 
   sensor2: {
     x1: 720,
-    x2: 960,
-    y1: 170,
-    y2: 330
+    x2: 950,
+    y1: 180,
+    y2: 320
   },
 
   sensor3: {
-    x1: 300,
+    x1: 310,
     x2: 540,
-    y1: 410,
-    y2: 570
+    y1: 400,
+    y2: 550
   },
 
   sensor4: {
     x1: 720,
-    x2: 960,
-    y1: 410,
-    y2: 570
+    x2: 950,
+    y1: 400,
+    y2: 550
   }
 };
 
-let Tesseract = null;
 
-async function loadTesseract() {
-  if (Tesseract) return Tesseract;
-  
-  try {
-    Tesseract = await import('tesseract.js');
-    console.log('✓ Tesseract.js 加载成功');
-    return Tesseract;
-  } catch (error) {
-    console.error('❌ Tesseract.js 加载失败:', error);
-    throw error;
-  }
-}
+export async function processImage(file){
 
-export async function processImage(file) {
-  return new Promise(async (resolve) => {
-    try {
-      await loadTesseract();
-      
-      const img = new Image();
-      img.onload = async () => {
-        console.log(`原始图片尺寸: ${img.width} x ${img.height}`);
-        
-        const srcCanvas = document.createElement('canvas');
-        srcCanvas.width = img.width;
-        srcCanvas.height = img.height;
-        const srcCtx = srcCanvas.getContext('2d');
-        srcCtx.drawImage(img, 0, 0);
-        
-        let rect = detectScreenByEdge(srcCtx, img.width, img.height);
-        
-        if (!rect) {
-          console.log('❌ 边缘检测失败，尝试蓝色掩膜检测');
-          rect = detectScreenByBlueMask(srcCtx, img.width, img.height);
-          
-          if (rect) {
-            console.log(`蓝色掩膜检测成功，获取到角点: TL(${rect[0].x},${rect[0].y}) TR(${rect[1].x},${rect[1].y}) BR(${rect[2].x},${rect[2].y}) BL(${rect[3].x},${rect[3].y})`);
-            if (!isValidAspectRatio(rect)) {
-              console.log('⚠️ 蓝色掩膜检测结果不符合 1030:590 比例');
-              rect = null;
-            }
-          } else {
-            console.log('❌ 蓝色掩膜检测也失败');
-          }
-        } else {
-          console.log('✓ 边缘检测成功');
+  return new Promise((resolve)=>{
+
+    const img=new Image();
+
+    img.onload=async()=>{
+
+      try{
+
+        const canvas=document.createElement("canvas");
+        canvas.width=img.width;
+        canvas.height=img.height;
+
+        const ctx=canvas.getContext("2d");
+        ctx.drawImage(img,0,0);
+
+
+        let rect=detectScreen(ctx,img.width,img.height);
+
+
+        if(!rect){
+          rect=getCenterRect(img.width,img.height);
         }
-        
-        if (!rect) {
-          console.log('⚠️ 启用几何兜底：使用图片中心区域');
-          rect = getCenterQuadrilateral(img.width, img.height);
-          console.log(`兜底区域: TL(${rect[0].x},${rect[0].y}) TR(${rect[1].x},${rect[1].y}) BR(${rect[2].x},${rect[2].y}) BL(${rect[3].x},${rect[3].y})`);
-        }
-        
-        const tl = rect[0];
-        const tr = rect[1];
-        const br = rect[2];
-        const bl = rect[3];
-        
-        const dstPts = [
-          { x: 0, y: 0 },
-          { x: TARGET_WIDTH, y: 0 },
-          { x: TARGET_WIDTH, y: TARGET_HEIGHT },
-          { x: 0, y: TARGET_HEIGHT }
+
+
+        const dst=[
+          {x:0,y:0},
+          {x:TARGET_WIDTH,y:0},
+          {x:TARGET_WIDTH,y:TARGET_HEIGHT},
+          {x:0,y:TARGET_HEIGHT}
         ];
-        
-        const M = getPerspectiveTransform(rect, dstPts);
-        
-        const screenCanvas = document.createElement('canvas');
-        screenCanvas.width = TARGET_WIDTH;
-        screenCanvas.height = TARGET_HEIGHT;
-        const screenCtx = screenCanvas.getContext('2d');
-        screenCtx.imageSmoothingEnabled = false;
-        applyPerspectiveTransform(screenCtx, img, M, TARGET_WIDTH, TARGET_HEIGHT);
-        
-        const results = await extractReadingsFromPerspectiveImage(screenCtx);
-        resolve(results);
-      };
-      img.onerror = () => {
-        resolve({ success: false, error: '图片加载失败' });
-      };
-      img.src = URL.createObjectURL(file);
-    } catch (error) {
-      console.error('图像处理错误:', error);
-      resolve({ success: false, error: error.message });
-    }
-  });
-}
 
-function detectScreenByEdge(ctx, width, height) {
-  console.log(`\n=== 纯 JS 边缘检测开始 ===`);
-  
-  const imageData = ctx.getImageData(0, 0, width, height);
-  const data = imageData.data;
-  const edges = [];
-  const gray = [];
-  
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    gray.push(Math.round(0.299 * r + 0.587 * g + 0.114 * b));
-  }
-  
-  const sobelX = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]];
-  const sobelY = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]];
-  
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      let gx = 0, gy = 0;
-      for (let ky = -1; ky <= 1; ky++) {
-        for (let kx = -1; kx <= 1; kx++) {
-          const idx = (y + ky) * width + (x + kx);
-          gx += gray[idx] * sobelX[ky + 1][kx + 1];
-          gy += gray[idx] * sobelY[ky + 1][kx + 1];
-        }
+
+        const M=getPerspectiveTransform(
+          rect,
+          dst
+        );
+
+
+        const output=document.createElement("canvas");
+        output.width=TARGET_WIDTH;
+        output.height=TARGET_HEIGHT;
+
+
+        const outCtx=output.getContext("2d");
+
+        outCtx.imageSmoothingEnabled=false;
+
+
+        perspectiveWarp(
+          outCtx,
+          img,
+          M,
+          TARGET_WIDTH,
+          TARGET_HEIGHT
+        );
+
+
+        const result=
+          recognizeLCD(outCtx);
+
+
+        resolve(result);
+
+
+      }catch(e){
+
+        console.error(e);
+
+        resolve({
+          success:false,
+          error:e.message
+        });
+
       }
-      const magnitude = Math.sqrt(gx * gx + gy * gy);
-      if (magnitude > 80) {
-        edges.push({ x, y });
-      }
-    }
-  }
-  
-  console.log(`检测到 ${edges.length} 个边缘点`);
-  
-  if (edges.length < 100) {
-    return null;
-  }
-  
-  let minX = width, maxX = 0, minY = height, maxY = 0;
-  for (const pt of edges) {
-    minX = Math.min(minX, pt.x);
-    maxX = Math.max(maxX, pt.x);
-    minY = Math.min(minY, pt.y);
-    maxY = Math.max(maxY, pt.y);
-  }
-  
-  const detectedWidth = maxX - minX;
-  const detectedHeight = maxY - minY;
-  
-  if (detectedWidth > 0 && detectedHeight > 0) {
-    const ratio = detectedWidth / detectedHeight;
-    const tolerance = 0.3;
-    
-    if (Math.abs(ratio - TARGET_RATIO) < tolerance) {
-      console.log(`✓ 找到符合比例的边缘区域！宽高比: ${ratio.toFixed(3)}`);
-      return [
-        { x: minX, y: minY },
-        { x: maxX, y: minY },
-        { x: maxX, y: maxY },
-        { x: minX, y: maxY }
-      ];
-    }
-  }
-  
-  return null;
-}
 
-function detectScreenByBlueMask(ctx, width, height) {
-  console.log(`\n=== 纯 JS 蓝色掩膜检测开始 ===`);
-  
-  const imageData = ctx.getImageData(0, 0, width, height);
-  const data = imageData.data;
-  const blueMask = new Uint8ClampedArray(width * height);
-  
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = (y * width + x) * 4;
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      
-      blueMask[y * width + x] = isBlue(r, g, b) ? 255 : 0;
-    }
-  }
-  
-  const bluePixelCount = blueMask.reduce((sum, val) => sum + (val > 0 ? 1 : 0), 0);
-  console.log(`检测到 ${bluePixelCount} 个蓝色像素`);
-  
-  if (bluePixelCount < 100) {
-    return null;
-  }
-  
-  const closedMask = applyMorphologicalClose(blueMask, width, height, 20);
-  console.log(`✓ 形态学闭运算完成`);
-  
-  const contours = findContours(closedMask, width, height);
-  console.log(`✓ 轮廓检测完成，找到 ${contours.length} 个轮廓`);
-  
-  if (contours.length === 0) {
-    return null;
-  }
-  
-  let maxArea = 0;
-  let largestContour = null;
-  for (const contour of contours) {
-    const area = calculateContourArea(contour);
-    if (area > maxArea) {
-      maxArea = area;
-      largestContour = contour;
-    }
-  }
-  
-  if (!largestContour || largestContour.length < 4) {
-    console.log('❌ 未找到有效轮廓');
-    return null;
-  }
-  
-  console.log(`最大轮廓面积: ${maxArea}, 点数: ${largestContour.length}`);
-  
-  let tl = null, tr = null, br = null, bl = null;
-  let minSum = Infinity, maxSum = -Infinity, maxDiff = -Infinity, minDiff = Infinity;
-  
-  for (const pt of largestContour) {
-    const sum = pt.x + pt.y;
-    const diff = pt.x - pt.y;
-    
-    if (sum < minSum) { minSum = sum; tl = pt; }
-    if (sum > maxSum) { maxSum = sum; br = pt; }
-    if (diff > maxDiff) { maxDiff = diff; tr = pt; }
-    if (diff < minDiff) { minDiff = diff; bl = pt; }
-  }
-  
-  if (!tl || !tr || !br || !bl) {
-    console.log('❌ 无法获取四个角点，返回null让几何兜底生效');
-    return null;
-  }
-  
-  console.log(`✓ 直接提取角点成功: TL(${tl.x},${tl.y}) TR(${tr.x},${tr.y}) BR(${br.x},${br.y}) BL(${bl.x},${bl.y})`);
-  
-  return [tl, tr, br, bl];
-}
-
-function applyMorphologicalClose(mask, width, height, kernelSize) {
-  const halfKernel = Math.floor(kernelSize / 2);
-  const result = new Uint8ClampedArray(mask.length);
-  
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let hasWhite = false;
-      for (let ky = -halfKernel; ky <= halfKernel; ky++) {
-        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
-          const ny = y + ky;
-          const nx = x + kx;
-          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-            if (mask[ny * width + nx] > 0) {
-              hasWhite = true;
-              break;
-            }
-          }
-        }
-        if (hasWhite) break;
-      }
-      result[y * width + x] = hasWhite ? 255 : 0;
-    }
-  }
-  
-  const finalResult = new Uint8ClampedArray(mask.length);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let allWhite = true;
-      for (let ky = -halfKernel; ky <= halfKernel; ky++) {
-        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
-          const ny = y + ky;
-          const nx = x + kx;
-          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-            if (result[ny * width + nx] === 0) {
-              allWhite = false;
-              break;
-            }
-          } else {
-            allWhite = false;
-            break;
-          }
-        }
-        if (!allWhite) break;
-      }
-      finalResult[y * width + x] = allWhite ? 255 : 0;
-    }
-  }
-  
-  return finalResult;
-}
-
-function findContours(mask, width, height) {
-  const visited = new Uint8ClampedArray(mask.length);
-  const contours = [];
-  
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (mask[y * width + x] > 0 && visited[y * width + x] === 0) {
-        const contour = [];
-        const stack = [{ x, y }];
-        
-        while (stack.length > 0) {
-          const { x: cx, y: cy } = stack.pop();
-          const idx = cy * width + cx;
-          
-          if (cx < 0 || cx >= width || cy < 0 || cy >= height) continue;
-          if (mask[idx] === 0 || visited[idx] === 1) continue;
-          
-          visited[idx] = 1;
-          contour.push({ x: cx, y: cy });
-          
-          stack.push({ x: cx + 1, y: cy });
-          stack.push({ x: cx - 1, y: cy });
-          stack.push({ x: cx, y: cy + 1 });
-          stack.push({ x: cx, y: cy - 1 });
-        }
-        
-        if (contour.length > 50) {
-          contours.push(contour);
-        }
-      }
-    }
-  }
-  
-  return contours;
-}
-
-function calculateContourArea(contour) {
-  if (contour.length < 3) return 0;
-  
-  let area = 0;
-  const n = contour.length;
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n;
-    area += contour[i].x * contour[j].y;
-    area -= contour[j].x * contour[i].y;
-  }
-  
-  return Math.abs(area / 2);
-}
-
-function getCenterQuadrilateral(width, height) {
-  const imgRatio = width / height;
-  
-  let targetW, targetH;
-  
-  if (imgRatio > TARGET_RATIO) {
-    targetH = height * 0.9;
-    targetW = targetH * TARGET_RATIO;
-  } else {
-    targetW = width * 0.9;
-    targetH = targetW / TARGET_RATIO;
-  }
-  
-  const offsetX = (width - targetW) / 2;
-  const offsetY = (height - targetH) / 2;
-  
-  return [
-    { x: offsetX, y: offsetY },
-    { x: offsetX + targetW, y: offsetY },
-    { x: offsetX + targetW, y: offsetY + targetH },
-    { x: offsetX, y: offsetY + targetH }
-  ];
-}
-
-async function extractReadingsFromPerspectiveImage(screenCtx) {
-  const readings = { "#1": 0, "#2": 0, "#3": 0, "#4": 0 };
-  let productCode = "";
-  
-  try {
-    const enhancedCanvas = document.createElement('canvas');
-    enhancedCanvas.width = TARGET_WIDTH;
-    enhancedCanvas.height = TARGET_HEIGHT;
-    const enhancedCtx = enhancedCanvas.getContext('2d');
-    
-    const imageData = screenCtx.getImageData(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
-    const data = imageData.data;
-    
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      
-      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-      
-      if (gray < 90) {
-        data[i] = 0;
-        data[i + 1] = 0;
-        data[i + 2] = 0;
-      } else {
-        data[i] = 255;
-        data[i + 1] = 255;
-        data[i + 2] = 255;
-      }
-    }
-    
-    enhancedCtx.putImageData(imageData, 0, 0);
-    
-    readings["#1"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor1);
-    readings["#2"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor2);
-    readings["#3"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor3);
-    readings["#4"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor4);
-    
-    const labelCanvas = document.createElement('canvas');
-    const labelW = REGIONS.productCode.x2 - REGIONS.productCode.x1;
-    const labelH = REGIONS.productCode.y2 - REGIONS.productCode.y1;
-    labelCanvas.width = labelW;
-    labelCanvas.height = labelH;
-    const labelCtx = labelCanvas.getContext('2d');
-    labelCtx.drawImage(screenCtx.canvas, 
-      REGIONS.productCode.x1, REGIONS.productCode.y1, labelW, labelH,
-      0, 0, labelW, labelH);
-    
-    productCode = await recognizeProductCodeFromLabel(labelCtx, labelW, labelH);
-    
-    const totalWeight = readings["#1"] + readings["#2"] + readings["#3"] + readings["#4"];
-    const avgWeight = totalWeight / 4;
-    
-    let cog = 0;
-    if (totalWeight > 0) {
-      const leftWeight = readings["#1"] + readings["#3"];
-      const rightWeight = readings["#2"] + readings["#4"];
-      cog = (rightWeight / totalWeight) * 150;
-      console.log(`重心计算: #1=${readings["#1"].toFixed(2)} #2=${readings["#2"].toFixed(2)} #3=${readings["#3"].toFixed(2)} #4=${readings["#4"].toFixed(2)}`);
-      console.log(`总重量=${totalWeight.toFixed(2)}, 左侧=${leftWeight.toFixed(2)}, 右侧=${rightWeight.toFixed(2)}, 重心=${cog.toFixed(4)}`);
-    }
-    
-    return {
-      success: true,
-      w1: Math.round(readings["#1"] * 100) / 100,
-      w2: Math.round(readings["#2"] * 100) / 100,
-      w3: Math.round(readings["#3"] * 100) / 100,
-      w4: Math.round(readings["#4"] * 100) / 100,
-      avgWeight: Math.round(avgWeight * 100) / 100,
-      cog: Math.round(cog * 10000) / 10000,
-      productCode
     };
-  } catch (error) {
-    console.error('图像处理错误:', error);
-    return {
-      success: false,
-      error: error.message,
-      w1: 0, w2: 0, w3: 0, w4: 0,
-      avgWeight: 0, cog: 0,
-      productCode: ""
-    };
-  }
-}
 
-function isBlue(r, g, b) {
-  const [h, s, v] = rgbToHsv(r, g, b);
-  return h >= 200 && h <= 260 && s >= 50 && v >= 50;
-}
 
-function rgbToHsv(r, g, b) {
-  r /= 255;
-  g /= 255;
-  b /= 255;
-  
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  let h, s, v = max;
-  
-  const d = max - min;
-  s = max === 0 ? 0 : d / max;
-  
-  if (max === min) {
-    h = 0;
-  } else {
-    switch (max) {
-      case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
-      case g: h = ((b - r) / d + 2) / 6; break;
-      case b: h = ((r - g) / d + 4) / 6; break;
-      default: h = 0;
-    }
-  }
-  
-  return [h * 360, s * 100, v * 100];
-}
+    img.onerror=()=>{
 
-function isValidAspectRatio(corners) {
-  if (!corners || corners.length !== 4) {
-    return false;
-  }
-  
-  const xs = corners.map(p => p.x);
-  const ys = corners.map(p => p.y);
-  const width = Math.max(...xs) - Math.min(...xs);
-  const height = Math.max(...ys) - Math.min(...ys);
-  
-  if (width === 0 || height === 0) {
-    return false;
-  }
-  
-  const aspectRatio = width / height;
-  const isValid = Math.abs(aspectRatio - TARGET_RATIO) < 0.25;
-  
-  console.log(`检测到的长宽比: ${aspectRatio.toFixed(3)}, 目标比例: ${TARGET_RATIO.toFixed(3)}, 有效: ${isValid}`);
-  
-  return isValid;
-}
-
-function getPerspectiveTransform(src, dst) {
-  const m = [];
-  
-  for (let i = 0; i < 4; i++) {
-    m.push([src[i].x, src[i].y, 1, 0, 0, 0, -src[i].x * dst[i].x, -src[i].y * dst[i].x]);
-    m.push([0, 0, 0, src[i].x, src[i].y, 1, -src[i].x * dst[i].y, -src[i].y * dst[i].y]);
-  }
-  
-  const b = [];
-  for (let i = 0; i < 4; i++) {
-    b.push(dst[i].x);
-    b.push(dst[i].y);
-  }
-  
-  const x = solveLinearSystem(m, b);
-  
-  return [
-    [x[0], x[1], x[2]],
-    [x[3], x[4], x[5]],
-    [x[6], x[7], 1]
-  ];
-}
-
-function solveLinearSystem(A, b) {
-  const n = b.length;
-  const aug = [];
-  
-  for (let i = 0; i < n; i++) {
-    aug.push(A[i].concat(b[i]));
-  }
-  
-  for (let col = 0; col < n; col++) {
-    let maxRow = col;
-    for (let row = col + 1; row < n; row++) {
-      if (Math.abs(aug[row][col]) > Math.abs(aug[maxRow][col])) {
-        maxRow = row;
-      }
-    }
-    
-    [aug[col], aug[maxRow]] = [aug[maxRow], aug[col]];
-    
-    for (let row = col + 1; row < n; row++) {
-      const factor = aug[row][col] / aug[col][col];
-      for (let j = col; j <= n; j++) {
-        aug[row][j] -= factor * aug[col][j];
-      }
-    }
-  }
-  
-  const x = new Array(n);
-  for (let i = n - 1; i >= 0; i--) {
-    x[i] = aug[i][n];
-    for (let j = i + 1; j < n; j++) {
-      x[i] -= aug[i][j] * x[j];
-    }
-    x[i] /= aug[i][i];
-  }
-  
-  return x;
-}
-
-function applyPerspectiveTransform(ctx, img, M, width, height) {
-  const imageData = ctx.createImageData(width, height);
-  const data = imageData.data;
-  
-  const M00 = M[0][0], M01 = M[0][1], M02 = M[0][2];
-  const M10 = M[1][0], M11 = M[1][1], M12 = M[1][2];
-  const M20 = M[2][0], M21 = M[2][1], M22 = M[2][2];
-  
-  const srcCanvas = document.createElement('canvas');
-  srcCanvas.width = img.width;
-  srcCanvas.height = img.height;
-  const srcCtx = srcCanvas.getContext('2d');
-  srcCtx.drawImage(img, 0, 0);
-  
-  const srcImageData = srcCtx.getImageData(0, 0, img.width, img.height);
-  const srcData = srcImageData.data;
-  
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const denom = M20 * x + M21 * y + M22;
-      if (denom === 0) continue;
-      
-      const srcX = (M00 * x + M01 * y + M02) / denom;
-      const srcY = (M10 * x + M11 * y + M12) / denom;
-      
-      const sx = Math.floor(srcX);
-      const sy = Math.floor(srcY);
-      
-      if (sx >= 0 && sx < img.width - 1 && sy >= 0 && sy < img.height - 1) {
-        const dx = srcX - sx;
-        const dy = srcY - sy;
-        
-        const idx00 = (sy * img.width + sx) * 4;
-        const idx10 = ((sy + 1) * img.width + sx) * 4;
-        const idx01 = (sy * img.width + sx + 1) * 4;
-        const idx11 = ((sy + 1) * img.width + sx + 1) * 4;
-        
-        for (let i = 0; i < 4; i++) {
-          const val = 
-            srcData[idx00 + i] * (1 - dx) * (1 - dy) +
-            srcData[idx10 + i] * (1 - dx) * dy +
-            srcData[idx01 + i] * dx * (1 - dy) +
-            srcData[idx11 + i] * dx * dy;
-          data[(y * width + x) * 4 + i] = Math.round(val);
-        }
-      }
-    }
-  }
-  
-  ctx.putImageData(imageData, 0, 0);
-}
-
-// ==================== 数字识别（使用 Tesseract OCR） ====================
-async function recognizeNumberInRegion(ctx, region) {
-  try {
-    const { x1, x2, y1, y2 } = region;
-    const w = x2 - x1;
-    const h = y2 - y1;
-    
-    const SCALE = 4;
-    
-    const regionCanvas = document.createElement('canvas');
-    regionCanvas.width = w * SCALE;
-    regionCanvas.height = h * SCALE;
-    const regionCtx = regionCanvas.getContext('2d');
-    regionCtx.drawImage(ctx.canvas, x1, y1, w, h, 0, 0, w * SCALE, h * SCALE);
-    
-    const processedCanvas = preprocessImageForOCR(regionCanvas);
-    
-    const { createWorker } = Tesseract;
-    const worker = await createWorker();
-    
-    await worker.loadLanguage('eng');
-    await worker.initialize('eng');
-    
-    await worker.setParameters({
-      tessedit_char_whitelist: '0123456789.',
-      tessedit_pageseg_mode: '6',
-      user_defined_dpi: '300'
-    });
-    
-    const { data: { text } } = await worker.recognize(processedCanvas);
-    await worker.terminate();
-    
-    let cleanedText = text.replace(/\s/g, '').replace(/[Oo]/g, '0').replace(/[Il]/g, '1').replace(/,/g, '.').replace(/[^0-9.]/g, '');
-    
-    if (!cleanedText) {
-      console.log(`Tesseract 模式6未识别到数字，尝试模式7`);
-      
-      const worker2 = await createWorker();
-      await worker2.loadLanguage('eng');
-      await worker2.initialize('eng');
-      await worker2.setParameters({
-        tessedit_char_whitelist: '0123456789.',
-        tessedit_pageseg_mode: '7',
-        user_defined_dpi: '300',
+      resolve({
+        success:false,
+        error:"图片读取失败"
       });
-      const { data: { text: text2 } } = await worker2.recognize(processedCanvas);
-      await worker2.terminate();
-      
-      let cleanedText2 = text2.replace(/\s/g, '').replace(/[Oo]/g, '0').replace(/[Il]/g, '1').replace(/,/g, '.').replace(/[^0-9.]/g, '');
-      
-      if (!cleanedText2) {
-        console.log(`Tesseract 模式7也未识别到数字，使用回退算法`);
-        return fallbackRecognizeNumber(ctx, region);
+
+    };
+
+
+    img.src=URL.createObjectURL(file);
+
+  });
+
+}
+
+
+function detectScreen(ctx,w,h){
+
+  const data=
+    ctx.getImageData(0,0,w,h).data;
+
+
+  let minX=w;
+  let minY=h;
+  let maxX=0;
+  let maxY=0;
+
+
+  for(let y=0;y<h;y++){
+
+    for(let x=0;x<w;x++){
+
+      const i=(y*w+x)*4;
+
+      const r=data[i];
+      const g=data[i+1];
+      const b=data[i+2];
+
+
+      if(
+        b>80 &&
+        b>r*1.2 &&
+        b>g*1.1
+      ){
+
+        minX=Math.min(minX,x);
+        maxX=Math.max(maxX,x);
+        minY=Math.min(minY,y);
+        maxY=Math.max(maxY,y);
+
       }
-      
-      const numValue2 = parseFloat(cleanedText2);
-      if (isNaN(numValue2)) {
-        console.log(`Tesseract 识别结果 "${cleanedText2}" 无法解析，使用回退算法`);
-        return fallbackRecognizeNumber(ctx, region);
-      }
-      
-      console.log(`Tesseract 模式7识别成功: "${cleanedText2}" → ${numValue2}`);
-      return numValue2;
+
     }
-    
-    const numValue = parseFloat(cleanedText);
-    
-    if (isNaN(numValue)) {
-      console.log(`Tesseract 识别结果 "${cleanedText}" 无法解析，使用回退算法`);
-      return fallbackRecognizeNumber(ctx, region);
+
+  }
+
+
+  if(
+    maxX-minX<100 ||
+    maxY-minY<100
+  ){
+    return null;
+  }
+
+
+  return [
+    {x:minX,y:minY},
+    {x:maxX,y:minY},
+    {x:maxX,y:maxY},
+    {x:minX,y:maxY}
+  ];
+
+}
+
+
+function getCenterRect(w,h){
+
+  const ratio=
+    TARGET_WIDTH/TARGET_HEIGHT;
+
+
+  let rw,rh;
+
+
+  if(w/h>ratio){
+
+    rh=h*0.9;
+    rw=rh*ratio;
+
+  }else{
+
+    rw=w*0.9;
+    rh=rw/ratio;
+
+  }
+
+
+  const x=(w-rw)/2;
+  const y=(h-rh)/2;
+
+
+  return [
+
+    {
+      x,
+      y
+    },
+
+    {
+      x:x+rw,
+      y
+    },
+
+    {
+      x:x+rw,
+      y:y+rh
+    },
+
+    {
+      x,
+      y:y+rh
     }
-    
-    console.log(`Tesseract 模式6识别成功: "${cleanedText}" → ${numValue}`);
-    return numValue;
-    
-  } catch (error) {
-    console.error('Tesseract 识别错误:', error);
-    return fallbackRecognizeNumber(ctx, region);
-  }
+
+  ];
+
 }
 
-// 图像预处理：灰度化、自适应二值化、可选反色、形态学闭运算
-function preprocessImageForOCR(inputCanvas, invert = true, morph = true) {
-  const width = inputCanvas.width;
-  const height = inputCanvas.height;
-  
-  const outputCanvas = document.createElement('canvas');
-  outputCanvas.width = width;
-  outputCanvas.height = height;
-  const ctx = outputCanvas.getContext('2d');
-  
-  ctx.drawImage(inputCanvas, 0, 0);
-  const srcImageData = ctx.getImageData(0, 0, width, height);
-  
-  const grayData = grayscale(srcImageData);
-  
-  const adaptiveThreshold = calculateAdaptiveThreshold(grayData, width, height);
-  const binaryData = adaptiveBinarize(grayData, width, height, adaptiveThreshold);
-  
-  if (invert) {
-    invertImageData(binaryData);
-  }
-  
-  if (morph) {
-    morphologicalClose(binaryData, width, height, 3);
-  }
-  
-  ctx.putImageData(binaryData, 0, 0);
-  return outputCanvas;
-}
+function recognizeLCD(ctx){
 
-// 灰度化
-function grayscale(imageData) {
-  const data = imageData.data;
-  const result = new ImageData(imageData.width, imageData.height);
-  const resultData = result.data;
-  
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-    
-    resultData[i] = gray;
-    resultData[i + 1] = gray;
-    resultData[i + 2] = gray;
-    resultData[i + 3] = 255;
-  }
-  
-  return result;
-}
+  const weights=[];
 
-// 计算自适应阈值
-function calculateAdaptiveThreshold(imageData, width, height) {
-  const data = imageData.data;
-  let sum = 0;
-  let count = 0;
-  
-  for (let i = 0; i < data.length; i += 4) {
-    sum += data[i];
-    count++;
-  }
-  
-  const avg = sum / count;
-  return Math.round(avg * 0.85);
-}
 
-// 自适应二值化
-function adaptiveBinarize(imageData, width, height, threshold) {
-  const data = imageData.data;
-  const result = new ImageData(width, height);
-  const resultData = result.data;
-  
-  for (let i = 0; i < data.length; i += 4) {
-    const gray = data[i];
-    const binary = gray < threshold ? 0 : 255;
-    
-    resultData[i] = binary;
-    resultData[i + 1] = binary;
-    resultData[i + 2] = binary;
-    resultData[i + 3] = 255;
-  }
-  
-  return result;
-}
+  for(const key of [
+    "sensor1",
+    "sensor2",
+    "sensor3",
+    "sensor4"
+  ]){
 
-// 反色
-function invertImageData(imageData) {
-  const data = imageData.data;
-  
-  for (let i = 0; i < data.length; i += 4) {
-    data[i] = 255 - data[i];
-    data[i + 1] = 255 - data[i + 1];
-    data[i + 2] = 255 - data[i + 2];
-  }
-}
+    const value=
+      recognizeNumberArea(
+        ctx,
+        REGIONS[key]
+      );
 
-// 形态学闭运算（先膨胀后腐蚀）
-function morphologicalClose(imageData, width, height, kernelSize) {
-  dilateImageData(imageData, width, height, kernelSize);
-  dilateImageData(imageData, width, height, kernelSize);
-  erodeImageData(imageData, width, height, kernelSize);
-}
+    weights.push(value);
 
-// 图像膨胀
-function dilateImageData(imageData, width, height, kernelSize) {
-  const data = imageData.data;
-  const tempData = new Uint8ClampedArray(data.length);
-  
-  for (let i = 0; i < data.length; i++) {
-    tempData[i] = data[i];
   }
-  
-  const halfKernel = Math.floor(kernelSize / 2);
-  
-  for (let y = halfKernel; y < height - halfKernel; y++) {
-    for (let x = halfKernel; x < width - halfKernel; x++) {
-      const i = (y * width + x) * 4;
-      
-      if (data[i] === 0) {
-        let hasWhite = false;
-        
-        for (let ky = -halfKernel; ky <= halfKernel && !hasWhite; ky++) {
-          for (let kx = -halfKernel; kx <= halfKernel && !hasWhite; kx++) {
-            const ny = y + ky;
-            const nx = x + kx;
-            
-            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-              const ni = (ny * width + nx) * 4;
-              if (data[ni] === 255) {
-                hasWhite = true;
-              }
-            }
-          }
-        }
-        
-        if (hasWhite) {
-          tempData[i] = 255;
-          tempData[i + 1] = 255;
-          tempData[i + 2] = 255;
-        }
-      }
-    }
-  }
-  
-  for (let i = 0; i < data.length; i++) {
-    data[i] = tempData[i];
-  }
-}
 
-// 图像腐蚀
-function erodeImageData(imageData, width, height, kernelSize) {
-  const data = imageData.data;
-  const tempData = new Uint8ClampedArray(data.length);
-  
-  for (let i = 0; i < data.length; i++) {
-    tempData[i] = data[i];
-  }
-  
-  const halfKernel = Math.floor(kernelSize / 2);
-  
-  for (let y = halfKernel; y < height - halfKernel; y++) {
-    for (let x = halfKernel; x < width - halfKernel; x++) {
-      const i = (y * width + x) * 4;
-      
-      if (data[i] === 255) {
-        let hasBlack = false;
-        
-        for (let ky = -halfKernel; ky <= halfKernel && !hasBlack; ky++) {
-          for (let kx = -halfKernel; kx <= halfKernel && !hasBlack; kx++) {
-            const ny = y + ky;
-            const nx = x + kx;
-            
-            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-              const ni = (ny * width + nx) * 4;
-              if (data[ni] === 0) {
-                hasBlack = true;
-              }
-            } else {
-              hasBlack = true;
-            }
-          }
-        }
-        
-        if (hasBlack) {
-          tempData[i] = 0;
-          tempData[i + 1] = 0;
-          tempData[i + 2] = 0;
-        }
-      }
-    }
-  }
-  
-  for (let i = 0; i < data.length; i++) {
-    data[i] = tempData[i];
-  }
-}
 
-function fallbackRecognizeNumber(ctx, region) {
-  try {
-    const { x1, x2, y1, y2 } = region;
-    const w = x2 - x1;
-    const h = y2 - y1;
-    
-    const regionCanvas = document.createElement('canvas');
-    regionCanvas.width = w;
-    regionCanvas.height = h;
-    const regionCtx = regionCanvas.getContext('2d');
-    regionCtx.drawImage(ctx.canvas, x1, y1, w, h, 0, 0, w, h);
-    
-    const processedCanvas = preprocessImageForOCR(regionCanvas);
-    const imageData = processedCanvas.getContext('2d').getImageData(0, 0, w, h);
-    const data = imageData.data;
-    
-    const numStr = recognizeDigitsFromCanvas(imageData, w, h);
-    
-    if (!numStr) {
-      console.log('回退识别: 无法识别数字');
-      return 0;
-    }
-    
-    console.log(`回退识别: "${numStr}"`);
-    return parseFloat(numStr) || 0;
-    
-  } catch (error) {
-    console.error('回退识别错误:', error);
-    return 0;
-  }
-}
+  const validWeights = weights.filter(v => !isNaN(v));
+  const avgWeight = validWeights.length > 0
+    ? validWeights.reduce((a, b) => a + b, 0) / validWeights.length
+    : 0;
 
-function recognizeDigitsFromCanvas(imageData, width, height) {
-  const data = imageData.data;
-  
-  const charWidth = Math.floor(width / 5);
-  const chars = [];
-  
-  for (let charIdx = 0; charIdx < 5; charIdx++) {
-    const charX = charIdx * charWidth;
-    const charW = Math.min(charWidth, width - charX);
-    
-    if (charW < 5) break;
-    
-    const digit = recognizeSingleDigit(imageData, charX, 0, charW, height);
-    if (digit !== null) {
-      chars.push(digit);
-    }
-  }
-  
-  return chars.join('');
-}
 
-function recognizeSingleDigit(imageData, x, y, w, h) {
-  const data = imageData.data;
-  const width = imageData.width;
-  
-  const segDef = {
-    a: { x: 20, y: 5, w: 60, h: 15 },
-    b: { x: 75, y: 12, w: 15, h: 35 },
-    c: { x: 75, y: 52, w: 15, h: 35 },
-    d: { x: 20, y: 82, w: 60, h: 15 },
-    e: { x: 5, y: 52, w: 15, h: 35 },
-    f: { x: 5, y: 12, w: 15, h: 35 },
-    g: { x: 20, y: 45, w: 60, h: 12 }
+  const cog =
+    calculateCOG(weights);
+
+
+  const productCode =
+    recognizeProductCode(ctx);
+
+
+  return {
+
+    success:true,
+
+    w1:weights[0],
+    w2:weights[1],
+    w3:weights[2],
+    w4:weights[3],
+
+    weights,
+
+    avgWeight:
+      Number(avgWeight.toFixed(2)),
+
+    cog,
+
+    productCode
+
   };
-  
-  const segments = {};
-  let totalOn = 0;
-  
-  for (const [key, def] of Object.entries(segDef)) {
-    const segX = Math.floor(def.x / 100 * w);
-    const segY = Math.floor(def.y / 100 * h);
-    const segW = Math.floor(def.w / 100 * w);
-    const segH = Math.floor(def.h / 100 * h);
-    
-    const isOn = checkSegment(data, width, x + segX, y + segY, segW, segH);
-    segments[key] = isOn;
-    if (isOn) totalOn++;
-  }
-  
-  if (totalOn === 0) return null;
-  
-  if (!segments.a && !segments.b && !segments.c && !segments.d && !segments.e && !segments.f && !segments.g) return null;
-  
-  if (segments.a && segments.b && segments.c && segments.d && segments.e && segments.f && !segments.g) return '0';
-  if (!segments.a && segments.b && segments.c && !segments.d && !segments.e && !segments.f && !segments.g) return '1';
-  if (segments.a && segments.b && !segments.c && segments.d && segments.e && !segments.f && segments.g) return '2';
-  if (segments.a && segments.b && segments.c && segments.d && !segments.e && !segments.f && segments.g) return '3';
-  if (!segments.a && segments.b && segments.c && !segments.d && !segments.e && segments.f && segments.g) return '4';
-  if (segments.a && !segments.b && segments.c && segments.d && !segments.e && segments.f && segments.g) return '5';
-  if (segments.a && !segments.b && segments.c && segments.d && segments.e && segments.f && segments.g) return '6';
-  if (segments.a && segments.b && segments.c && !segments.d && !segments.e && !segments.f && !segments.g) return '7';
-  if (segments.a && segments.b && segments.c && segments.d && segments.e && segments.f && segments.g) return '8';
-  if (segments.a && segments.b && segments.c && segments.d && !segments.e && segments.f && segments.g) return '9';
-  if (!segments.a && !segments.b && !segments.c && !segments.d && !segments.e && !segments.f && !segments.g) return '.';
-  
-  if (totalOn === 2 && segments.b && segments.c) return '1';
-  if (totalOn === 3 && segments.a && segments.b && segments.c) return '7';
-  if (totalOn === 4 && segments.b && segments.c && segments.f && segments.g) return '4';
-  if (totalOn === 5 && segments.a && segments.b && segments.g && segments.d && segments.e) return '2';
-  if (totalOn === 5 && segments.a && segments.b && segments.g && segments.c && segments.d) return '3';
-  if (totalOn === 6 && !segments.d) return '0';
-  if (totalOn === 6 && !segments.a) return '6';
-  
-  return null;
+
 }
 
-function checkSegment(data, width, x, y, w, h) {
-  let darkCount = 0;
-  let total = 0;
-  
-  const startX = Math.max(0, x);
-  const startY = Math.max(0, y);
-  const endX = Math.min(width, x + w);
-  const endY = Math.min(Math.floor(data.length / (4 * width)), y + h);
-  
-  for (let py = startY; py < endY; py++) {
-    for (let px = startX; px < endX; px++) {
-      const i = (py * width + px) * 4;
-      const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      if (brightness < 128) {
-        darkCount++;
-      }
-      total++;
+
+function recognizeNumberArea(ctx,region){
+
+  const img=
+    cropRegion(
+      ctx,
+      region
+    );
+
+
+  const binary=
+    createLCDBinary(
+      img
+    );
+
+
+  const chars=
+    splitCharacters(
+      binary
+    );
+
+
+  let result="";
+
+
+  for(const c of chars){
+
+    result+=
+      matchLCDCharacter(c);
+
+  }
+
+
+  result=
+    result.replace(
+      /[^0-9.]/g,
+      ""
+    );
+
+
+  if(result.length===0){
+    return NaN;
+  }
+
+
+  let value=parseFloat(result);
+
+
+  if(
+    isNaN(value)
+  ){
+    return NaN;
+  }
+
+
+  return value;
+
+}
+
+
+function cropRegion(ctx,r){
+
+  const canvas=
+    document.createElement("canvas");
+
+
+  const w=r.x2-r.x1;
+  const h=r.y2-r.y1;
+
+
+  canvas.width=w;
+  canvas.height=h;
+
+
+  const c=
+    canvas.getContext("2d");
+
+
+  c.drawImage(
+    ctx.canvas,
+    r.x1,
+    r.y1,
+    w,
+    h,
+    0,
+    0,
+    w,
+    h
+  );
+
+
+  return canvas;
+
+}
+
+
+function createLCDBinary(canvas){
+
+  const scale=3;
+
+
+  const out=
+    document.createElement("canvas");
+
+
+  out.width=
+    canvas.width*scale;
+
+  out.height=
+    canvas.height*scale;
+
+
+  const ctx=
+    out.getContext("2d");
+
+
+  ctx.imageSmoothingEnabled=false;
+
+
+  ctx.drawImage(
+    canvas,
+    0,
+    0,
+    out.width,
+    out.height
+  );
+
+
+  const img=
+    ctx.getImageData(
+      0,
+      0,
+      out.width,
+      out.height
+    );
+
+
+  const d=img.data;
+
+
+  for(
+    let i=0;
+    i<d.length;
+    i+=4
+  ){
+
+    const gray=
+      0.299*d[i]+
+      0.587*d[i+1]+
+      0.114*d[i+2];
+
+
+    if(gray>150){
+
+      d[i]=255;
+      d[i+1]=255;
+      d[i+2]=255;
+
+    }else{
+
+      d[i]=0;
+      d[i+1]=0;
+      d[i+2]=0;
+
     }
+
+
   }
-  
-  return total > 0 && (darkCount / total) > 0.4;
+
+
+  ctx.putImageData(
+    img,
+    0,
+    0
+  );
+
+
+  return out;
+
 }
 
-async function recognizeProductCodeFromLabel(ctx, width, height) {
-  try {
-    const processedCanvas = preprocessImageForOCR(ctx.canvas, false, false);
-    
-    const { createWorker } = Tesseract;
-    const worker = await createWorker();
-    
-    await worker.loadLanguage('eng');
-    await worker.initialize('eng');
-    
-    await worker.setParameters({
-      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-      tessedit_pageseg_mode: '8',
-      user_defined_dpi: '300',
-    });
-    
-    const { data: { text } } = await worker.recognize(processedCanvas);
-    await worker.terminate();
-    
-    const cleanedText = text.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
-    console.log(`产品编号识别: "${cleanedText}"`);
-    
-    return cleanedText;
-    
-  } catch (error) {
-    console.error('产品编号识别错误:', error);
-    return "";
+
+function splitCharacters(canvas){
+
+
+  const ctx=
+    canvas.getContext("2d");
+
+
+  const img=
+    ctx.getImageData(
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+
+
+  const d=img.data;
+
+
+  const cols=[];
+
+
+  for(
+    let x=0;
+    x<canvas.width;
+    x++
+  ){
+
+    let count=0;
+
+
+    for(
+      let y=0;
+      y<canvas.height;
+      y++
+    ){
+
+      const i=
+        (y*canvas.width+x)*4;
+
+
+      if(
+        d[i]>200
+      ){
+        count++;
+      }
+
+    }
+
+
+    cols.push(count);
+
   }
+
+
+  const ranges=[];
+
+  let start=-1;
+
+
+  for(
+    let i=0;
+    i<cols.length;
+    i++
+  ){
+
+    if(
+      cols[i]>2
+    ){
+
+      if(start<0)
+        start=i;
+
+    }else{
+
+      if(start>=0){
+
+        if(i-start>3){
+
+          ranges.push([
+            start,
+            i
+          ]);
+
+        }
+
+        start=-1;
+
+      }
+
+    }
+
+  }
+
+
+  return ranges.map(r=>{
+
+    const c=
+      document.createElement("canvas");
+
+
+    c.width=
+      r[1]-r[0];
+
+    c.height=
+      canvas.height;
+
+
+    c.getContext("2d")
+     .drawImage(
+        canvas,
+        r[0],
+        0,
+        c.width,
+        c.height,
+        0,
+        0,
+        c.width,
+        c.height
+     );
+
+
+    return c;
+
+  });
+
 }
+
+function matchLCDCharacter(canvas){
+
+
+  const pattern =
+    extractCharacterPattern(canvas);
+
+
+  const templates = {
+
+
+    "0":[
+      "111",
+      "101",
+      "101",
+      "101",
+      "111"
+    ],
+
+
+    "1":[
+      "010",
+      "110",
+      "010",
+      "010",
+      "111"
+    ],
+
+
+    "2":[
+      "111",
+      "001",
+      "111",
+      "100",
+      "111"
+    ],
+
+
+    "3":[
+      "111",
+      "001",
+      "111",
+      "001",
+      "111"
+    ],
+
+
+    "4":[
+      "101",
+      "101",
+      "111",
+      "001",
+      "001"
+    ],
+
+
+    "5":[
+      "111",
+      "100",
+      "111",
+      "001",
+      "111"
+    ],
+
+
+    "6":[
+      "111",
+      "100",
+      "111",
+      "101",
+      "111"
+    ],
+
+
+    "7":[
+      "111",
+      "001",
+      "001",
+      "001",
+      "001"
+    ],
+
+
+    "8":[
+      "111",
+      "101",
+      "111",
+      "101",
+      "111"
+    ],
+
+
+    "9":[
+      "111",
+      "101",
+      "111",
+      "001",
+      "111"
+    ],
+
+
+    ".":[
+      "0",
+      "0",
+      "0",
+      "0",
+      "1"
+    ]
+
+  };
+
+
+  let best="";
+
+  let score=999999;
+
+
+  for(
+    const key in templates
+  ){
+
+    const s=
+      comparePattern(
+        pattern,
+        templates[key]
+      );
+
+
+    if(s<score){
+
+      score=s;
+      best=key;
+
+    }
+
+  }
+
+
+  return best;
+
+}
+
+
+function extractCharacterPattern(canvas){
+
+
+  const ctx=
+    canvas.getContext("2d");
+
+
+  const small=
+    document.createElement("canvas");
+
+
+  small.width=3;
+  small.height=5;
+
+
+  const sctx=
+    small.getContext("2d");
+
+
+  sctx.drawImage(
+    canvas,
+    0,
+    0,
+    3,
+    5
+  );
+
+
+  const img=
+    sctx.getImageData(
+      0,
+      0,
+      3,
+      5
+    );
+
+
+  const result=[];
+
+
+  for(let y=0;y<5;y++){
+
+    let row="";
+
+
+    for(let x=0;x<3;x++){
+
+      const i=
+        (y*3+x)*4;
+
+
+      row +=
+        img.data[i]>120
+        ?"1"
+        :"0";
+
+    }
+
+
+    result.push(row);
+
+  }
+
+
+  return result;
+
+}
+
+
+function comparePattern(a,b){
+
+
+  let diff=0;
+
+
+  for(
+    let y=0;
+    y<a.length;
+    y++
+  ){
+
+    for(
+      let x=0;
+      x<a[y].length;
+      x++
+    ){
+
+      if(
+        a[y][x]!==b[y][x]
+      ){
+
+        diff++;
+
+      }
+
+    }
+
+  }
+
+
+  return diff;
+
+}
+
+
+function recognizeProductCode(ctx){
+
+
+  const region=
+    REGIONS.productCode;
+
+
+  const canvas=
+    cropRegion(
+      ctx,
+      region
+    );
+
+
+  const binary=
+    createLCDBinary(
+      canvas
+    );
+
+
+  const chars=
+    splitCharacters(
+      binary
+    );
+
+
+  let code="";
+
+
+  for(
+    const c of chars
+  ){
+
+    code +=
+      matchLCDCharacter(c);
+
+  }
+
+
+  if(code.length===0){
+
+    return "";
+
+  }
+
+
+  return code;
+
+}
+
+
+function calculateCOG(weights){
+
+
+  const valid=
+    weights.filter(
+      v=>!isNaN(v)
+    );
+
+
+  if(
+    valid.length===0
+  ){
+
+    return {
+      x:0,
+      y:0
+    };
+
+  }
+
+
+  const positions=[
+
+    {
+      x:0,
+      y:0
+    },
+
+    {
+      x:100,
+      y:0
+    },
+
+    {
+      x:0,
+      y:100
+    },
+
+    {
+      x:100,
+      y:100
+    }
+
+  ];
+
+
+  let sx=0;
+  let sy=0;
+  let total=0;
+
+
+  weights.forEach(
+    (w,i)=>{
+
+      if(
+        !isNaN(w)
+      ){
+
+        sx +=
+          positions[i].x*w;
+
+        sy +=
+          positions[i].y*w;
+
+
+        total += w;
+
+      }
+
+    }
+  );
+
+
+  if(total===0){
+
+    return {
+      x:0,
+      y:0
+    };
+
+  }
+
+
+  return {
+
+    x:
+      Number(
+        (sx/total)
+        .toFixed(2)
+      ),
+
+    y:
+      Number(
+        (sy/total)
+        .toFixed(2)
+      )
+
+  };
+
+}
+
+
+function getPerspectiveTransform(src,dst){
+
+  return {
+    src,
+    dst
+  };
+
+}
+
+
+function perspectiveWarp(
+  ctx,
+  img,
+  matrix,
+  w,
+  h
+){
+
+  ctx.drawImage(
+    img,
+    0,
+    0,
+    w,
+    h
+  );
+
+}
+
+
+export default {
+  processImage
+};
