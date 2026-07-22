@@ -3,13 +3,41 @@ const TARGET_WIDTH = 1030;
 const TARGET_HEIGHT = 590;
 const TARGET_RATIO = TARGET_WIDTH / TARGET_HEIGHT;
 
-// 区域坐标定义（按照用户提供的新坐标）
 const REGIONS = {
-  productCode: { x1: 143, x2: 435, y1: 67, y2: 143 },
-  sensor1: { x1: 255, x2: 435, y1: 106, y2: 200 },
-  sensor2: { x1: 725, x2: 895, y1: 106, y2: 200 },
-  sensor3: { x1: 255, x2: 435, y1: 363, y2: 456 },
-  sensor4: { x1: 725, x2: 895, y1: 363, y2: 456 }
+  productCode: {
+    x1: 285,
+    x2: 430,
+    y1: 55,
+    y2: 120
+  },
+
+  sensor1: {
+    x1: 300,
+    x2: 540,
+    y1: 170,
+    y2: 330
+  },
+
+  sensor2: {
+    x1: 720,
+    x2: 960,
+    y1: 170,
+    y2: 330
+  },
+
+  sensor3: {
+    x1: 300,
+    x2: 540,
+    y1: 410,
+    y2: 570
+  },
+
+  sensor4: {
+    x1: 720,
+    x2: 960,
+    y1: 410,
+    y2: 570
+  }
 };
 
 let Tesseract = null;
@@ -85,6 +113,7 @@ export async function processImage(file) {
         screenCanvas.width = TARGET_WIDTH;
         screenCanvas.height = TARGET_HEIGHT;
         const screenCtx = screenCanvas.getContext('2d');
+        screenCtx.imageSmoothingEnabled = false;
         applyPerspectiveTransform(screenCtx, img, M, TARGET_WIDTH, TARGET_HEIGHT);
         
         const results = await extractReadingsFromPerspectiveImage(screenCtx);
@@ -389,9 +418,9 @@ async function extractReadingsFromPerspectiveImage(screenCtx) {
       const g = data[i + 1];
       const b = data[i + 2];
       
-      const isBlueBackground = isBlue(r, g, b);
+      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
       
-      if (isBlueBackground) {
+      if (gray < 90) {
         data[i] = 0;
         data[i + 1] = 0;
         data[i + 2] = 0;
@@ -628,11 +657,13 @@ async function recognizeNumberInRegion(ctx, region) {
     const w = x2 - x1;
     const h = y2 - y1;
     
+    const SCALE = 4;
+    
     const regionCanvas = document.createElement('canvas');
-    regionCanvas.width = w;
-    regionCanvas.height = h;
+    regionCanvas.width = w * SCALE;
+    regionCanvas.height = h * SCALE;
     const regionCtx = regionCanvas.getContext('2d');
-    regionCtx.drawImage(ctx.canvas, x1, y1, w, h, 0, 0, w, h);
+    regionCtx.drawImage(ctx.canvas, x1, y1, w, h, 0, 0, w * SCALE, h * SCALE);
     
     const processedCanvas = preprocessImageForOCR(regionCanvas);
     
@@ -644,18 +675,44 @@ async function recognizeNumberInRegion(ctx, region) {
     
     await worker.setParameters({
       tessedit_char_whitelist: '0123456789.',
-      tessedit_pageseg_mode: '7',
-      user_defined_dpi: '300',
+      tessedit_pageseg_mode: '6',
+      user_defined_dpi: '300'
     });
     
     const { data: { text } } = await worker.recognize(processedCanvas);
     await worker.terminate();
     
-    const cleanedText = text.trim().replace(/[^0-9.]/g, '');
+    let cleanedText = text.replace(/\s/g, '').replace(/[Oo]/g, '0').replace(/[Il]/g, '1').replace(/,/g, '.').replace(/[^0-9.]/g, '');
     
     if (!cleanedText) {
-      console.log(`Tesseract 未识别到数字，使用回退算法`);
-      return fallbackRecognizeNumber(ctx, region);
+      console.log(`Tesseract 模式6未识别到数字，尝试模式7`);
+      
+      const worker2 = await createWorker();
+      await worker2.loadLanguage('eng');
+      await worker2.initialize('eng');
+      await worker2.setParameters({
+        tessedit_char_whitelist: '0123456789.',
+        tessedit_pageseg_mode: '7',
+        user_defined_dpi: '300',
+      });
+      const { data: { text: text2 } } = await worker2.recognize(processedCanvas);
+      await worker2.terminate();
+      
+      let cleanedText2 = text2.replace(/\s/g, '').replace(/[Oo]/g, '0').replace(/[Il]/g, '1').replace(/,/g, '.').replace(/[^0-9.]/g, '');
+      
+      if (!cleanedText2) {
+        console.log(`Tesseract 模式7也未识别到数字，使用回退算法`);
+        return fallbackRecognizeNumber(ctx, region);
+      }
+      
+      const numValue2 = parseFloat(cleanedText2);
+      if (isNaN(numValue2)) {
+        console.log(`Tesseract 识别结果 "${cleanedText2}" 无法解析，使用回退算法`);
+        return fallbackRecognizeNumber(ctx, region);
+      }
+      
+      console.log(`Tesseract 模式7识别成功: "${cleanedText2}" → ${numValue2}`);
+      return numValue2;
     }
     
     const numValue = parseFloat(cleanedText);
@@ -665,7 +722,7 @@ async function recognizeNumberInRegion(ctx, region) {
       return fallbackRecognizeNumber(ctx, region);
     }
     
-    console.log(`Tesseract 识别成功: "${cleanedText}" → ${numValue}`);
+    console.log(`Tesseract 模式6识别成功: "${cleanedText}" → ${numValue}`);
     return numValue;
     
   } catch (error) {
@@ -674,8 +731,8 @@ async function recognizeNumberInRegion(ctx, region) {
   }
 }
 
-// 图像预处理：灰度化、二值化、可选反色、膨胀处理
-function preprocessImageForOCR(inputCanvas, invert = true, dilate = true) {
+// 图像预处理：灰度化、自适应二值化、可选反色、形态学闭运算
+function preprocessImageForOCR(inputCanvas, invert = true, morph = true) {
   const width = inputCanvas.width;
   const height = inputCanvas.height;
   
@@ -684,45 +741,101 @@ function preprocessImageForOCR(inputCanvas, invert = true, dilate = true) {
   outputCanvas.height = height;
   const ctx = outputCanvas.getContext('2d');
   
-  const imageData = ctx.getImageData(0, 0, width, height);
-  const data = imageData.data;
-  
   ctx.drawImage(inputCanvas, 0, 0);
   const srcImageData = ctx.getImageData(0, 0, width, height);
-  const srcData = srcImageData.data;
   
-  for (let i = 0; i < srcData.length; i += 4) {
-    const r = srcData[i];
-    const g = srcData[i + 1];
-    const b = srcData[i + 2];
-    
-    const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-    
-    const threshold = 128;
-    let binary = gray < threshold ? 0 : 255;
-    
-    if (invert) {
-      binary = 255 - binary;
-    }
-    
-    data[i] = binary;
-    data[i + 1] = binary;
-    data[i + 2] = binary;
-    data[i + 3] = 255;
+  const grayData = grayscale(srcImageData);
+  
+  const adaptiveThreshold = calculateAdaptiveThreshold(grayData, width, height);
+  const binaryData = adaptiveBinarize(grayData, width, height, adaptiveThreshold);
+  
+  if (invert) {
+    invertImageData(binaryData);
   }
   
-  if (dilate) {
-    dilateImageData(imageData);
+  if (morph) {
+    morphologicalClose(binaryData, width, height, 3);
   }
   
-  ctx.putImageData(imageData, 0, 0);
+  ctx.putImageData(binaryData, 0, 0);
   return outputCanvas;
 }
 
-// 图像膨胀：将白色区域扩大，使七段数码管的断开笔画连接
-function dilateImageData(imageData) {
-  const width = imageData.width;
-  const height = imageData.height;
+// 灰度化
+function grayscale(imageData) {
+  const data = imageData.data;
+  const result = new ImageData(imageData.width, imageData.height);
+  const resultData = result.data;
+  
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    
+    resultData[i] = gray;
+    resultData[i + 1] = gray;
+    resultData[i + 2] = gray;
+    resultData[i + 3] = 255;
+  }
+  
+  return result;
+}
+
+// 计算自适应阈值
+function calculateAdaptiveThreshold(imageData, width, height) {
+  const data = imageData.data;
+  let sum = 0;
+  let count = 0;
+  
+  for (let i = 0; i < data.length; i += 4) {
+    sum += data[i];
+    count++;
+  }
+  
+  const avg = sum / count;
+  return Math.round(avg * 0.85);
+}
+
+// 自适应二值化
+function adaptiveBinarize(imageData, width, height, threshold) {
+  const data = imageData.data;
+  const result = new ImageData(width, height);
+  const resultData = result.data;
+  
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = data[i];
+    const binary = gray < threshold ? 0 : 255;
+    
+    resultData[i] = binary;
+    resultData[i + 1] = binary;
+    resultData[i + 2] = binary;
+    resultData[i + 3] = 255;
+  }
+  
+  return result;
+}
+
+// 反色
+function invertImageData(imageData) {
+  const data = imageData.data;
+  
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = 255 - data[i];
+    data[i + 1] = 255 - data[i + 1];
+    data[i + 2] = 255 - data[i + 2];
+  }
+}
+
+// 形态学闭运算（先膨胀后腐蚀）
+function morphologicalClose(imageData, width, height, kernelSize) {
+  dilateImageData(imageData, width, height, kernelSize);
+  dilateImageData(imageData, width, height, kernelSize);
+  erodeImageData(imageData, width, height, kernelSize);
+}
+
+// 图像膨胀
+function dilateImageData(imageData, width, height, kernelSize) {
   const data = imageData.data;
   const tempData = new Uint8ClampedArray(data.length);
   
@@ -730,17 +843,17 @@ function dilateImageData(imageData) {
     tempData[i] = data[i];
   }
   
-  const kernelSize = 2;
+  const halfKernel = Math.floor(kernelSize / 2);
   
-  for (let y = kernelSize; y < height - kernelSize; y++) {
-    for (let x = kernelSize; x < width - kernelSize; x++) {
+  for (let y = halfKernel; y < height - halfKernel; y++) {
+    for (let x = halfKernel; x < width - halfKernel; x++) {
       const i = (y * width + x) * 4;
       
       if (data[i] === 0) {
         let hasWhite = false;
         
-        for (let ky = -kernelSize; ky <= kernelSize && !hasWhite; ky++) {
-          for (let kx = -kernelSize; kx <= kernelSize && !hasWhite; kx++) {
+        for (let ky = -halfKernel; ky <= halfKernel && !hasWhite; ky++) {
+          for (let kx = -halfKernel; kx <= halfKernel && !hasWhite; kx++) {
             const ny = y + ky;
             const nx = x + kx;
             
@@ -757,6 +870,54 @@ function dilateImageData(imageData) {
           tempData[i] = 255;
           tempData[i + 1] = 255;
           tempData[i + 2] = 255;
+        }
+      }
+    }
+  }
+  
+  for (let i = 0; i < data.length; i++) {
+    data[i] = tempData[i];
+  }
+}
+
+// 图像腐蚀
+function erodeImageData(imageData, width, height, kernelSize) {
+  const data = imageData.data;
+  const tempData = new Uint8ClampedArray(data.length);
+  
+  for (let i = 0; i < data.length; i++) {
+    tempData[i] = data[i];
+  }
+  
+  const halfKernel = Math.floor(kernelSize / 2);
+  
+  for (let y = halfKernel; y < height - halfKernel; y++) {
+    for (let x = halfKernel; x < width - halfKernel; x++) {
+      const i = (y * width + x) * 4;
+      
+      if (data[i] === 255) {
+        let hasBlack = false;
+        
+        for (let ky = -halfKernel; ky <= halfKernel && !hasBlack; ky++) {
+          for (let kx = -halfKernel; kx <= halfKernel && !hasBlack; kx++) {
+            const ny = y + ky;
+            const nx = x + kx;
+            
+            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+              const ni = (ny * width + nx) * 4;
+              if (data[ni] === 0) {
+                hasBlack = true;
+              }
+            } else {
+              hasBlack = true;
+            }
+          }
+        }
+        
+        if (hasBlack) {
+          tempData[i] = 0;
+          tempData[i + 1] = 0;
+          tempData[i + 2] = 0;
         }
       }
     }
@@ -910,7 +1071,7 @@ async function recognizeProductCodeFromLabel(ctx, width, height) {
     
     await worker.setParameters({
       tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-      tessedit_pageseg_mode: '7',
+      tessedit_pageseg_mode: '8',
       user_defined_dpi: '300',
     });
     
