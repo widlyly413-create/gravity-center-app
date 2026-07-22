@@ -1,6 +1,7 @@
 // 固定目标尺寸（与本地测试脚本一致）
 const TARGET_WIDTH = 1030;
 const TARGET_HEIGHT = 590;
+const TARGET_RATIO = TARGET_WIDTH / TARGET_HEIGHT;
 
 // 区域坐标定义（按照用户提供的新坐标）
 const REGIONS = {
@@ -11,57 +12,10 @@ const REGIONS = {
   sensor4: { x1: 650, x2: 950, y1: 340, y2: 475 }
 };
 
-// 等待 OpenCV.js 加载（带超时机制）
-function waitForOpenCV() {
-  return new Promise((resolve, reject) => {
-    if (window.cv && window.cvReady) {
-      console.log('✓ OpenCV.js 已预加载');
-      resolve();
-      return;
-    }
-
-    console.log('⏳ 等待 OpenCV.js 加载...');
-    let attempts = 0;
-    const maxAttempts = 100; // 最多等待10秒（100 * 100ms）
-    
-    const check = setInterval(() => {
-      attempts++;
-      
-      if (window.cv && window.cvReady) {
-        clearInterval(check);
-        console.log('✓ OpenCV.js 加载成功');
-        resolve();
-      } else if (attempts >= maxAttempts) {
-        clearInterval(check);
-        const errorMsg = '❌ OpenCV.js 加载超时，请检查网络连接或刷新页面';
-        console.error(errorMsg);
-        reject(new Error(errorMsg));
-      } else if (attempts % 10 === 0) {
-        console.log(`⏳ OpenCV.js 加载中... (${attempts * 100}ms)`);
-      }
-    }, 100);
-  });
-}
-
 export async function processImage(file) {
-  return new Promise(async (resolve) => {
-    // 等待 OpenCV.js 加载完成
-    try {
-      await waitForOpenCV();
-    } catch (error) {
-      console.error('OpenCV.js 加载失败:', error);
-      resolve({
-        success: false,
-        error: error.message,
-        w1: 0, w2: 0, w3: 0, w4: 0,
-        productCode: ""
-      });
-      return;
-    }
-    console.log('✓ OpenCV.js 已加载');
-    
+  return new Promise((resolve) => {
     const img = new Image();
-    img.onload = async () => {
+    img.onload = () => {
       console.log(`原始图片尺寸: ${img.width} x ${img.height}`);
       
       const srcCanvas = document.createElement('canvas');
@@ -70,13 +24,13 @@ export async function processImage(file) {
       const srcCtx = srcCanvas.getContext('2d');
       srcCtx.drawImage(img, 0, 0);
       
-      // 优先使用标准边缘检测算法（OpenCV Canny+轮廓+四边形检测）
-      let rect = await fallbackEdgeDetection(srcCtx, img.width, img.height);
+      // 第一步：使用纯 JS 边缘检测
+      let rect = detectScreenByEdge(srcCtx, img.width, img.height);
       
-      // 如果边缘检测失败，尝试蓝色掩膜检测作为备选
+      // 如果边缘检测失败，尝试蓝色掩膜检测
       if (!rect) {
         console.log('❌ 边缘检测失败，尝试蓝色掩膜检测');
-        rect = await detectScreenByBlueMaskFromCanvas(srcCtx, img.width, img.height);
+        rect = detectScreenByBlueMask(srcCtx, img.width, img.height);
         
         if (rect) {
           console.log(`蓝色掩膜检测成功，获取到角点: TL(${rect[0].x},${rect[0].y}) TR(${rect[1].x},${rect[1].y}) BR(${rect[2].x},${rect[2].y}) BL(${rect[3].x},${rect[3].y})`);
@@ -88,25 +42,20 @@ export async function processImage(file) {
           console.log('❌ 蓝色掩膜检测也失败');
         }
       } else {
-        console.log('✓ 边缘检测成功，跳过蓝色掩膜检测');
+        console.log('✓ 边缘检测成功');
       }
       
+      // 几何兜底：如果所有检测都失败，使用图片中心的标准比例框
       if (!rect) {
-        resolve({
-          success: false,
-          error: '无法检测到屏幕区域',
-          w1: 0, w2: 0, w3: 0, w4: 0,
-          productCode: ""
-        });
-        return;
+        console.log('⚠️ 启用几何兜底：使用图片中心区域');
+        rect = getCenterQuadrilateral(img.width, img.height);
+        console.log(`兜底区域: TL(${rect[0].x},${rect[0].y}) TR(${rect[1].x},${rect[1].y}) BR(${rect[2].x},${rect[2].y}) BL(${rect[3].x},${rect[3].y})`);
       }
       
       const tl = rect[0];
       const tr = rect[1];
       const br = rect[2];
       const bl = rect[3];
-      
-      console.log(`检测到屏幕角点: TL(${tl.x},${tl.y}) TR(${tr.x},${tr.y}) BR(${br.x},${br.y}) BL(${bl.x},${bl.y})`);
       
       // 执行透视变换到固定尺寸 1030x590
       const dstPts = [
@@ -124,7 +73,7 @@ export async function processImage(file) {
       const screenCtx = screenCanvas.getContext('2d');
       applyPerspectiveTransform(screenCtx, img, M, TARGET_WIDTH, TARGET_HEIGHT);
       
-      // 继续处理识别读数
+      // 提取读数
       const results = extractReadingsFromPerspectiveImage(screenCtx);
       resolve(results);
     };
@@ -135,357 +84,173 @@ export async function processImage(file) {
   });
 }
 
-function extractReadingsFromImage(img) {
-  const width = img.width;
-  const height = img.height;
+// ==================== 纯 JS 边缘检测 ====================
+function detectScreenByEdge(ctx, width, height) {
+  console.log(`\n=== 纯 JS 边缘检测开始 ===`);
   
-  const readings = {
-    "#1": 0,
-    "#2": 0,
-    "#3": 0,
-    "#4": 0
-  };
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
   
-  let productCode = "";
+  // 简化的边缘检测：使用 Sobel 算子
+  const edges = [];
+  const gray = [];
   
-  try {
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = width;
-    tempCanvas.height = height;
-    const ctx = tempCanvas.getContext('2d');
-    ctx.drawImage(img, 0, 0);
+  // 先转灰度
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    gray.push(Math.round(0.299 * r + 0.587 * g + 0.114 * b));
+  }
+  
+  // Sobel 边缘检测
+  const sobelX = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]];
+  const sobelY = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]];
+  
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      let gx = 0, gy = 0;
+      for (let ky = -1; ky <= 1; ky++) {
+        for (let kx = -1; kx <= 1; kx++) {
+          const idx = (y + ky) * width + (x + kx);
+          gx += gray[idx] * sobelX[ky + 1][kx + 1];
+          gy += gray[idx] * sobelY[ky + 1][kx + 1];
+        }
+      }
+      const magnitude = Math.sqrt(gx * gx + gy * gy);
+      if (magnitude > 80) {
+        edges.push({ x, y });
+      }
+    }
+  }
+  
+  console.log(`检测到 ${edges.length} 个边缘点`);
+  
+  // 如果边缘点太少，返回 null
+  if (edges.length < 100) {
+    return null;
+  }
+  
+  // 找到边缘点的边界框
+  let minX = width, maxX = 0, minY = height, maxY = 0;
+  for (const pt of edges) {
+    minX = Math.min(minX, pt.x);
+    maxX = Math.max(maxX, pt.x);
+    minY = Math.min(minY, pt.y);
+    maxY = Math.max(maxY, pt.y);
+  }
+  
+  const detectedWidth = maxX - minX;
+  const detectedHeight = maxY - minY;
+  
+  // 检查宽高比
+  if (detectedWidth > 0 && detectedHeight > 0) {
+    const ratio = detectedWidth / detectedHeight;
+    const tolerance = 0.3;
     
-    const enhancedCanvas = document.createElement('canvas');
-    enhancedCanvas.width = width;
-    enhancedCanvas.height = height;
-    const enhancedCtx = enhancedCanvas.getContext('2d');
-    
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const data = imageData.data;
-    
-    for (let i = 0; i < data.length; i += 4) {
+    if (Math.abs(ratio - TARGET_RATIO) < tolerance) {
+      console.log(`✓ 找到符合比例的边缘区域！宽高比: ${ratio.toFixed(3)}`);
+      return [
+        { x: minX, y: minY },
+        { x: maxX, y: minY },
+        { x: maxX, y: maxY },
+        { x: minX, y: maxY }
+      ];
+    }
+  }
+  
+  return null;
+}
+
+// ==================== 纯 JS 蓝色掩膜检测 ====================
+function detectScreenByBlueMask(ctx, width, height) {
+  console.log(`\n=== 纯 JS 蓝色掩膜检测开始 ===`);
+  
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+  
+  const bluePixels = [];
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
       const r = data[i];
       const g = data[i + 1];
       const b = data[i + 2];
       
-      const isBlueBackground = isBlue(r, g, b);
-      
-      if (isBlueBackground) {
-        data[i] = 0;
-        data[i + 1] = 0;
-        data[i + 2] = 0;
-      } else {
-        data[i] = 255;
-        data[i + 1] = 255;
-        data[i + 2] = 255;
+      if (isBlue(r, g, b)) {
+        bluePixels.push({ x, y });
       }
     }
-    
-    enhancedCtx.putImageData(imageData, 0, 0);
-    
-    const scaleX = width / TARGET_WIDTH;
-    const scaleY = height / TARGET_HEIGHT;
-    
-    const scaledRegions = {
-      sensor1: {
-        x1: REGIONS.sensor1.x1 * scaleX,
-        x2: REGIONS.sensor1.x2 * scaleX,
-        y1: REGIONS.sensor1.y1 * scaleY,
-        y2: REGIONS.sensor1.y2 * scaleY
-      },
-      sensor2: {
-        x1: REGIONS.sensor2.x1 * scaleX,
-        x2: REGIONS.sensor2.x2 * scaleX,
-        y1: REGIONS.sensor2.y1 * scaleY,
-        y2: REGIONS.sensor2.y2 * scaleY
-      },
-      sensor3: {
-        x1: REGIONS.sensor3.x1 * scaleX,
-        x2: REGIONS.sensor3.x2 * scaleX,
-        y1: REGIONS.sensor3.y1 * scaleY,
-        y2: REGIONS.sensor3.y2 * scaleY
-      },
-      sensor4: {
-        x1: REGIONS.sensor4.x1 * scaleX,
-        x2: REGIONS.sensor4.x2 * scaleX,
-        y1: REGIONS.sensor4.y1 * scaleY,
-        y2: REGIONS.sensor4.y2 * scaleY
-      },
-      productCode: {
-        x1: REGIONS.productCode.x1 * scaleX,
-        x2: REGIONS.productCode.x2 * scaleX,
-        y1: REGIONS.productCode.y1 * scaleY,
-        y2: REGIONS.productCode.y2 * scaleY
-      }
-    };
-    
-    readings["#1"] = recognizeNumberInRegion(enhancedCtx, scaledRegions.sensor1);
-    readings["#2"] = recognizeNumberInRegion(enhancedCtx, scaledRegions.sensor2);
-    readings["#3"] = recognizeNumberInRegion(enhancedCtx, scaledRegions.sensor3);
-    readings["#4"] = recognizeNumberInRegion(enhancedCtx, scaledRegions.sensor4);
-    
-    const labelCanvas = document.createElement('canvas');
-    const labelW = scaledRegions.productCode.x2 - scaledRegions.productCode.x1;
-    const labelH = scaledRegions.productCode.y2 - scaledRegions.productCode.y1;
-    labelCanvas.width = labelW;
-    labelCanvas.height = labelH;
-    const labelCtx = labelCanvas.getContext('2d');
-    labelCtx.drawImage(ctx.canvas, 
-      scaledRegions.productCode.x1, scaledRegions.productCode.y1, labelW, labelH,
-      0, 0, labelW, labelH);
-    
-    productCode = recognizeProductCodeFromLabel(labelCtx, labelW, labelH);
-    
-    const totalWeight = readings["#1"] + readings["#2"] + readings["#3"] + readings["#4"];
-    const avgWeight = totalWeight / 4;
-    
-    let cog = 0;
-    if (totalWeight > 0) {
-      cog = ((readings["#3"] + readings["#4"]) / totalWeight) * 150;
-    }
-    
-    return {
-      success: true,
-      w1: Math.round(readings["#1"] * 100) / 100,
-      w2: Math.round(readings["#2"] * 100) / 100,
-      w3: Math.round(readings["#3"] * 100) / 100,
-      w4: Math.round(readings["#4"] * 100) / 100,
-      avgWeight: Math.round(avgWeight * 100) / 100,
-      cog: Math.round(cog * 10000) / 10000,
-      productCode
-    };
-  } catch (error) {
-    console.error('图像处理错误:', error);
-    return {
-      success: false,
-      error: error.message,
-      w1: 0, w2: 0, w3: 0, w4: 0,
-      avgWeight: 0, cog: 0,
-      productCode: ""
-    };
   }
+  
+  console.log(`检测到 ${bluePixels.length} 个蓝色像素`);
+  
+  if (bluePixels.length < 100) {
+    return null;
+  }
+  
+  // 找到蓝色区域的边界框
+  let minX = width, maxX = 0, minY = height, maxY = 0;
+  for (const pt of bluePixels) {
+    minX = Math.min(minX, pt.x);
+    maxX = Math.max(maxX, pt.x);
+    minY = Math.min(minY, pt.y);
+    maxY = Math.max(maxY, pt.y);
+  }
+  
+  const detectedWidth = maxX - minX;
+  const detectedHeight = maxY - minY;
+  
+  if (detectedWidth > 0 && detectedHeight > 0) {
+    const ratio = detectedWidth / detectedHeight;
+    const tolerance = 0.3;
+    
+    if (Math.abs(ratio - TARGET_RATIO) < tolerance) {
+      console.log(`✓ 找到符合比例的蓝色区域！宽高比: ${ratio.toFixed(3)}`);
+      return [
+        { x: minX, y: minY },
+        { x: maxX, y: minY },
+        { x: maxX, y: maxY },
+        { x: minX, y: maxY }
+      ];
+    }
+  }
+  
+  return null;
 }
 
-// ==================== 蓝色掩膜检测（使用 OpenCV.js） ====================
-async function detectScreenByBlueMaskFromCanvas(ctx, width, height) {
-  console.log(`\n=== 蓝色掩膜检测开始 ===`);
-  console.log(`图片尺寸: ${width} x ${height}`);
+// ==================== 几何兜底：获取图片中心的标准比例框 ====================
+function getCenterQuadrilateral(width, height) {
+  // 计算能容纳在图片中的最大 1030:590 比例区域
+  const imgRatio = width / height;
   
-  const cv = window.cv;
-  if (!cv) {
-    console.error('❌ OpenCV.js 未加载');
-    return null;
+  let targetW, targetH;
+  
+  if (imgRatio > TARGET_RATIO) {
+    // 图片比较宽，以高度为准
+    targetH = height * 0.9;
+    targetW = targetH * TARGET_RATIO;
+  } else {
+    // 图片比较高，以宽度为准
+    targetW = width * 0.9;
+    targetH = targetW / TARGET_RATIO;
   }
   
-  try {
-    // 从 Canvas 获取图像数据
-    const imageData = ctx.getImageData(0, 0, width, height);
-    
-    // 创建 OpenCV Mat
-    const src = cv.matFromImageData(imageData);
-    const hsv = new cv.Mat();
-    const mask = new cv.Mat();
-    
-    // 转换到 HSV 颜色空间
-    cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
-    cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
-    
-    // 定义蓝色范围（OpenCV HSV范围：H: 0-179, S: 0-255, V: 0-255）
-    const lowerBlue = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [100, 50, 50]);  // H: 200/2=100
-    const upperBlue = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [130, 255, 255]); // H: 260/2=130
-    
-    // 创建蓝色掩膜
-    cv.inRange(hsv, lowerBlue, upperBlue, mask);
-    
-    // 形态学闭运算
-    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(30, 30));
-    const closedMask = new cv.Mat();
-    cv.morphologyEx(mask, closedMask, cv.MORPH_CLOSE, kernel);
-    
-    // 寻找轮廓
-    const contours = new cv.MatVector();
-    const hierarchy = new cv.Mat();
-    cv.findContours(closedMask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-    
-    console.log(`发现 ${contours.size()} 个轮廓`);
-    
-    if (contours.size() === 0) {
-      console.log('❌ 未找到轮廓');
-      src.delete(); hsv.delete(); mask.delete(); kernel.delete(); closedMask.delete(); contours.delete(); hierarchy.delete();
-      return null;
-    }
-    
-    // 找到最大轮廓
-    let maxArea = 0;
-    let maxContour = null;
-    for (let i = 0; i < contours.size(); i++) {
-      const contour = contours.get(i);
-      const area = cv.contourArea(contour);
-      if (area > maxArea) {
-        maxArea = area;
-        maxContour = contour;
-      }
-    }
-    
-    if (!maxContour) {
-      console.log('❌ 未找到有效轮廓');
-      src.delete(); hsv.delete(); mask.delete(); kernel.delete(); closedMask.delete(); contours.delete(); hierarchy.delete();
-      return null;
-    }
-    
-    // 多边形逼近获取4个角点
-    const perimeter = cv.arcLength(maxContour, true);
-    let approx = new cv.Mat();
-    
-    for (const tolerance of [0.02, 0.03, 0.04, 0.05, 0.06]) {
-      cv.approxPolyDP(maxContour, approx, tolerance * perimeter, true);
-      
-      if (approx.rows === 4) {
-        console.log(`✓ 使用容差 ${tolerance} 成功获取4个角点`);
-        
-        // 转换为点数组
-        const pts = [];
-        for (let i = 0; i < approx.rows; i++) {
-          pts.push({ x: approx.data32S[i * 2], y: approx.data32S[i * 2 + 1] });
-        }
-        
-        // 清理资源
-        src.delete(); hsv.delete(); mask.delete(); kernel.delete(); closedMask.delete(); contours.delete(); hierarchy.delete(); approx.delete();
-        
-        return orderPoints(pts);
-      }
-    }
-    
-    console.log('❌ 无法获取4个角点');
-    src.delete(); hsv.delete(); mask.delete(); kernel.delete(); closedMask.delete(); contours.delete(); hierarchy.delete(); approx.delete();
-    return null;
-    
-  } catch (error) {
-    console.error('蓝色掩膜检测错误:', error);
-    return null;
-  }
-}
-
-// ==================== 边缘检测保底方案（使用 OpenCV.js） ====================
-async function fallbackEdgeDetection(ctx, width, height) {
-  console.log(`\n=== 边缘检测保底方案启动 ===`);
-  console.log(`图片尺寸: ${width} x ${height}`);
+  const offsetX = (width - targetW) / 2;
+  const offsetY = (height - targetH) / 2;
   
-  const cv = window.cv;
-  if (!cv) {
-    console.error('❌ OpenCV.js 未加载');
-    return null;
-  }
-  
-  try {
-    // 从 Canvas 获取图像数据
-    const imageData = ctx.getImageData(0, 0, width, height);
-    
-    // 创建 OpenCV Mat
-    const src = cv.matFromImageData(imageData);
-    const gray = new cv.Mat();
-    const blurred = new cv.Mat();
-    const edged = new cv.Mat();
-    const dilated = new cv.Mat();
-    
-    // 1. 灰度化
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    console.log('✓ 灰度化完成');
-    
-    // 2. 高斯模糊
-    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-    console.log('✓ 高斯模糊完成');
-    
-    // 3. Canny边缘检测
-    cv.Canny(blurred, edged, 30, 150);
-    console.log('✓ Canny边缘检测完成');
-    
-    // 4. 膨胀边缘
-    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-    cv.dilate(edged, dilated, kernel);
-    console.log('✓ 边缘膨胀完成');
-    
-    // 5. 寻找轮廓
-    const contours = new cv.MatVector();
-    const hierarchy = new cv.Mat();
-    cv.findContours(dilated, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
-    
-    console.log(`发现 ${contours.size()} 个轮廓`);
-    
-    if (contours.size() === 0) {
-      console.log('❌ 未找到轮廓');
-      src.delete(); gray.delete(); blurred.delete(); edged.delete(); dilated.delete(); contours.delete(); hierarchy.delete();
-      return null;
-    }
-    
-    // 6. 按面积排序，取前15个最大的轮廓
-    const contourAreas = [];
-    for (let i = 0; i < contours.size(); i++) {
-      const contour = contours.get(i);
-      contourAreas.push({ index: i, area: cv.contourArea(contour) });
-    }
-    
-    contourAreas.sort((a, b) => b.area - a.area);
-    const topIndices = contourAreas.slice(0, 15).map(c => c.index);
-    
-    // 7. 遍历轮廓，寻找符合长宽比的四边形
-    const targetRatio = TARGET_WIDTH / TARGET_HEIGHT;
-    const tolerance = 0.25;
-    
-    for (const idx of topIndices) {
-      const contour = contours.get(idx);
-      const perimeter = cv.arcLength(contour, true);
-      const approx = new cv.Mat();
-      
-      cv.approxPolyDP(contour, approx, 0.02 * perimeter, true);
-      
-      if (approx.rows === 4) {
-        // 计算外接矩形的长宽比
-        const pts = [];
-        for (let i = 0; i < approx.rows; i++) {
-          pts.push({ x: approx.data32S[i * 2], y: approx.data32S[i * 2 + 1] });
-        }
-        
-        const xs = pts.map(p => p.x);
-        const ys = pts.map(p => p.y);
-        const w = Math.max(...xs) - Math.min(...xs);
-        const h = Math.max(...ys) - Math.min(...ys);
-        
-        if (w > 0 && h > 0) {
-          const aspectRatio = w / h;
-          
-          if ((targetRatio - tolerance) < aspectRatio && aspectRatio < (targetRatio + tolerance)) {
-            console.log(`✓ 找到符合比例的四边形！宽高比: ${aspectRatio.toFixed(3)}`);
-            
-            // 清理资源
-            src.delete(); gray.delete(); blurred.delete(); edged.delete(); dilated.delete(); contours.delete(); hierarchy.delete(); approx.delete();
-            
-            return orderPoints(pts);
-          }
-        }
-      }
-      approx.delete();
-    }
-    
-    console.log('❌ 保底失败：未找到比例接近 1030:590 的四边形区域');
-    src.delete(); gray.delete(); blurred.delete(); edged.delete(); dilated.delete(); contours.delete(); hierarchy.delete();
-    return null;
-    
-  } catch (error) {
-    console.error('边缘检测错误:', error);
-    return null;
-  }
+  return [
+    { x: offsetX, y: offsetY },
+    { x: offsetX + targetW, y: offsetY },
+    { x: offsetX + targetW, y: offsetY + targetH },
+    { x: offsetX, y: offsetY + targetH }
+  ];
 }
 
 // ==================== 从透视变换后的图像提取读数 ====================
 function extractReadingsFromPerspectiveImage(screenCtx) {
-  const readings = {
-    "#1": 0,
-    "#2": 0,
-    "#3": 0,
-    "#4": 0
-  };
-  
+  const readings = { "#1": 0, "#2": 0, "#3": 0, "#4": 0 };
   let productCode = "";
   
   try {
@@ -596,29 +361,6 @@ function rgbToHsv(r, g, b) {
   return [h * 360, s * 100, v * 100];
 }
 
-// ==================== 几何运算 ====================
-function orderPoints(pts) {
-  const rect = new Array(4);
-  
-  const sortedPts = pts.slice().sort((a, b) => a.x - b.x);
-  
-  const leftPts = sortedPts.slice(0, 2);
-  const rightPts = sortedPts.slice(2);
-  
-  leftPts.sort((a, b) => a.y - b.y);
-  rightPts.sort((a, b) => a.y - b.y);
-  
-  rect[0] = leftPts[0]; // 左上
-  rect[1] = rightPts[0]; // 右上
-  rect[2] = rightPts[1]; // 右下
-  rect[3] = leftPts[1]; // 左下
-  
-  return rect;
-}
-
-const TARGET_RATIO = TARGET_WIDTH / TARGET_HEIGHT;
-const RATIO_TOLERANCE = 0.25;
-
 function isValidAspectRatio(corners) {
   if (!corners || corners.length !== 4) {
     return false;
@@ -634,7 +376,7 @@ function isValidAspectRatio(corners) {
   }
   
   const aspectRatio = width / height;
-  const isValid = (TARGET_RATIO - RATIO_TOLERANCE) < aspectRatio && aspectRatio < (TARGET_RATIO + RATIO_TOLERANCE);
+  const isValid = Math.abs(aspectRatio - TARGET_RATIO) < 0.25;
   
   console.log(`检测到的长宽比: ${aspectRatio.toFixed(3)}, 目标比例: ${TARGET_RATIO.toFixed(3)}, 有效: ${isValid}`);
   
@@ -650,25 +392,19 @@ function getPerspectiveTransform(src, dst) {
     m.push([0, 0, 0, src[i].x, src[i].y, 1, -src[i].x * dst[i].y, -src[i].y * dst[i].y]);
   }
   
-  const A = createMatrix(m);
   const b = [];
-  
   for (let i = 0; i < 4; i++) {
     b.push(dst[i].x);
     b.push(dst[i].y);
   }
   
-  const x = solveLinearSystem(A, b);
+  const x = solveLinearSystem(m, b);
   
   return [
     [x[0], x[1], x[2]],
     [x[3], x[4], x[5]],
     [x[6], x[7], 1]
   ];
-}
-
-function createMatrix(arr) {
-  return arr;
 }
 
 function solveLinearSystem(A, b) {
@@ -1004,18 +740,4 @@ function recognizeSingleChar(imageData, width, height) {
   }
   
   return bestMatch;
-}
-
-// ==================== 蓝色掩膜检测（兼容Image输入） ====================
-async function detectScreenByBlueMask(img, width, height) {
-  console.log(`\n=== 蓝色掩膜检测开始 ===`);
-  console.log(`图片尺寸: ${width} x ${height}`);
-  
-  const tempCanvas = document.createElement('canvas');
-  tempCanvas.width = width;
-  tempCanvas.height = height;
-  const ctx = tempCanvas.getContext('2d');
-  ctx.drawImage(img, 0, 0);
-  
-  return detectScreenByBlueMaskFromCanvas(ctx, width, height);
 }
