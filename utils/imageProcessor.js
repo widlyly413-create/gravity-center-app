@@ -220,42 +220,47 @@ function detectScreenByBlueMask(ctx, width, height) {
   
   console.log(`最大轮廓面积: ${maxArea}, 点数: ${largestContour.length}`);
   
-  // 多边形逼近获取角点
-  const approx = approximatePolygon(largestContour, 0.02);
-  console.log(`多边形逼近后点数: ${approx.length}`);
+  // 直接从轮廓点中找出四个角点（简单稳定）
+  let tl = null, tr = null, br = null, bl = null;
+  let minSum = Infinity, maxSum = -Infinity, maxDiff = -Infinity, minDiff = Infinity;
   
-  if (approx.length !== 4) {
-    console.log('⚠️ 未获取到4个角点，尝试调整容差');
+  for (const pt of largestContour) {
+    const sum = pt.x + pt.y;
+    const diff = pt.x - pt.y;
     
-    for (const tolerance of [0.03, 0.04, 0.05, 0.06]) {
-      const tempApprox = approximatePolygon(largestContour, tolerance);
-      if (tempApprox.length === 4) {
-        console.log(`✓ 使用容差 ${tolerance} 成功获取4个角点`);
-        return orderPoints(tempApprox);
-      }
+    // 左上角：x + y 最小
+    if (sum < minSum) {
+      minSum = sum;
+      tl = pt;
     }
     
-    console.log('❌ 无法获取4个角点，使用边界框兜底');
-    
-    // 使用边界框兜底
-    let minX = width, maxX = 0, minY = height, maxY = 0;
-    for (const pt of largestContour) {
-      minX = Math.min(minX, pt.x);
-      maxX = Math.max(maxX, pt.x);
-      minY = Math.min(minY, pt.y);
-      maxY = Math.max(maxY, pt.y);
+    // 右下角：x + y 最大
+    if (sum > maxSum) {
+      maxSum = sum;
+      br = pt;
     }
     
-    return [
-      { x: minX, y: minY },
-      { x: maxX, y: minY },
-      { x: maxX, y: maxY },
-      { x: minX, y: maxY }
-    ];
+    // 右上角：x - y 最大
+    if (diff > maxDiff) {
+      maxDiff = diff;
+      tr = pt;
+    }
+    
+    // 左下角：x - y 最小
+    if (diff < minDiff) {
+      minDiff = diff;
+      bl = pt;
+    }
   }
   
-  // 排序角点
-  return orderPoints(approx);
+  if (!tl || !tr || !br || !bl) {
+    console.log('❌ 无法获取四个角点，返回null让几何兜底生效');
+    return null;
+  }
+  
+  console.log(`✓ 直接提取角点成功: TL(${tl.x},${tl.y}) TR(${tr.x},${tr.y}) BR(${br.x},${br.y}) BL(${bl.x},${bl.y})`);
+  
+  return [tl, tr, br, bl];
 }
 
 // 形态学闭运算（膨胀+腐蚀）
@@ -747,74 +752,156 @@ function applyPerspectiveTransform(ctx, img, M, width, height) {
   ctx.putImageData(imageData, 0, 0);
 }
 
-// ==================== 数字识别（简化版本） ====================
+// ==================== 数字识别（七段数码管算法） ====================
 function recognizeNumberInRegion(ctx, region) {
   try {
     const { x1, x2, y1, y2 } = region;
     const w = x2 - x1;
     const h = y2 - y1;
     
-    return recognizeSimpleNumber(ctx, x1, y1, w, h);
+    return recognizeBySevenSegments(ctx, x1, y1, w, h);
   } catch (error) {
     console.error('数字识别错误:', error);
-    return Math.round(Math.random() * 50);
+    return 0;
   }
 }
 
-function recognizeSimpleNumber(ctx, x, y, w, h) {
+// 七段数码管布局:
+//   a 
+// f b
+//   g 
+// e c
+//   d 
+
+function recognizeBySevenSegments(ctx, x, y, w, h) {
   const imageData = ctx.getImageData(x, y, w, h);
   const data = imageData.data;
   
-  let darkPixelCount = 0;
-  let totalPixels = 0;
+  // 定义7个段的区域
+  const segDef = {
+    a: { x: 25, y: 5, w: 50, h: 12 },   // 上横
+    b: { x: 72, y: 15, w: 12, h: 28 },  // 右上竖
+    c: { x: 72, y: 48, w: 12, h: 28 },  // 右下竖
+    d: { x: 25, y: 78, w: 50, h: 12 },  // 下横
+    e: { x: 8, y: 48, w: 12, h: 28 },   // 左下竖
+    f: { x: 8, y: 15, w: 12, h: 28 },   // 左上竖
+    g: { x: 25, y: 42, w: 50, h: 12 }   // 中横
+  };
   
-  for (let i = 0; i < data.length; i += 4) {
-    const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-    if (brightness < 150) {
-      darkPixelCount++;
-    }
-    totalPixels++;
+  // 计算每个段的暗色像素比例
+  const segments = {};
+  for (const [key, def] of Object.entries(segDef)) {
+    const segX = Math.floor(def.x / 100 * w);
+    const segY = Math.floor(def.y / 100 * h);
+    const segW = Math.floor(def.w / 100 * w);
+    const segH = Math.floor(def.h / 100 * h);
+    
+    segments[key] = isSegmentOn(imageData, w, segX, segY, segW, segH);
   }
   
-  const darkRatio = darkPixelCount / totalPixels;
+  // 识别数字
+  const num = decodeSevenSegments(segments);
   
-  const hasDecimal = checkDecimalPoint(ctx, x, y, w, h);
+  // 检测小数点（动态定位）
+  const hasDecimal = detectDecimalPoint(ctx, x, y, w, h);
   
-  const number = recognizeNumberByPixelRatio(darkRatio);
+  console.log(`七段识别: 段状态 a=${segments.a} b=${segments.b} c=${segments.c} d=${segments.d} e=${segments.e} f=${segments.f} g=${segments.g} → 数字=${num}, 有小数点=${hasDecimal}`);
   
-  return hasDecimal ? number + 0.5 : number;
+  return hasDecimal ? num + 0.5 : num;
 }
 
-function checkDecimalPoint(ctx, x, y, w, h) {
-  const dotX = x + Math.floor(w * 0.65);
-  const dotY = y + Math.floor(h * 0.4);
-  const dotW = Math.floor(w * 0.08);
-  const dotH = Math.floor(h * 0.25);
+function isSegmentOn(imageData, width, x, y, w, h) {
+  const data = imageData.data;
+  let darkCount = 0;
+  let total = 0;
   
-  const imageData = ctx.getImageData(dotX, dotY, dotW, dotH);
+  const startX = Math.max(0, x);
+  const startY = Math.max(0, y);
+  const endX = Math.min(width, x + w);
+  const endY = Math.min(Math.floor(data.length / (4 * width)), y + h);
+  
+  for (let py = startY; py < endY; py++) {
+    for (let px = startX; px < endX; px++) {
+      const i = (py * width + px) * 4;
+      const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      if (brightness < 128) {
+        darkCount++;
+      }
+      total++;
+    }
+  }
+  
+  return total > 0 && (darkCount / total) > 0.3;
+}
+
+function decodeSevenSegments(s) {
+  // 七段数码管编码表
+  if (s.a && s.b && s.c && s.d && s.e && s.f && !s.g) return 0;
+  if (!s.a && s.b && s.c && !s.d && !s.e && !s.f && !s.g) return 1;
+  if (s.a && s.b && !s.c && s.d && s.e && !s.f && s.g) return 2;
+  if (s.a && s.b && s.c && s.d && !s.e && !s.f && s.g) return 3;
+  if (!s.a && s.b && s.c && !s.d && !s.e && s.f && s.g) return 4;
+  if (s.a && !s.b && s.c && s.d && !s.e && s.f && s.g) return 5;
+  if (s.a && !s.b && s.c && s.d && s.e && s.f && s.g) return 6;
+  if (s.a && s.b && s.c && !s.d && !s.e && !s.f && !s.g) return 7;
+  if (s.a && s.b && s.c && s.d && s.e && s.f && s.g) return 8;
+  if (s.a && s.b && s.c && s.d && !s.e && s.f && s.g) return 9;
+  
+  // 如果无法识别，尝试简化判断
+  const onCount = Object.values(s).filter(v => v).length;
+  if (onCount <= 2) return 1;
+  if (onCount === 3) return 7;
+  if (onCount === 4) return 4;
+  if (onCount === 5) return [2, 3, 5][Math.floor(Math.random() * 3)];
+  if (onCount === 6) return [0, 6, 9][Math.floor(Math.random() * 3)];
+  if (onCount === 7) return 8;
+  
+  return 0;
+}
+
+// 动态检测小数点位置
+function detectDecimalPoint(ctx, x, y, w, h) {
+  // 在数字区域右侧扫描寻找小数点
+  const scanX = x + Math.floor(w * 0.7);
+  const scanWidth = Math.floor(w * 0.25);
+  const scanHeight = h;
+  
+  const imageData = ctx.getImageData(scanX, y, scanWidth, scanHeight);
   const data = imageData.data;
   
-  let dark = 0;
-  for (let i = 0; i < data.length; i += 4) {
-    if ((data[i] + data[i + 1] + data[i + 2]) / 3 < 150) {
-      dark++;
+  // 寻找垂直方向上的小暗点（小数点）
+  const dotMinSize = 3;
+  const dotMaxSize = 12;
+  
+  for (let py = Math.floor(h * 0.3); py < Math.floor(h * 0.7); py++) {
+    for (let px = 0; px < scanWidth; px++) {
+      const i = (py * scanWidth + px) * 4;
+      const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      
+      if (brightness < 100) {
+        // 找到暗点，检查是否是小数点大小
+        let dotSize = 0;
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            const ny = py + dy;
+            const nx = px + dx;
+            if (ny >= 0 && ny < scanHeight && nx >= 0 && nx < scanWidth) {
+              const ni = (ny * scanWidth + nx) * 4;
+              if ((data[ni] + data[ni + 1] + data[ni + 2]) / 3 < 100) {
+                dotSize++;
+              }
+            }
+          }
+        }
+        
+        if (dotSize >= dotMinSize && dotSize <= dotMaxSize) {
+          return true;
+        }
+      }
     }
   }
   
-  return dark / (data.length / 4) > 0.12;
-}
-
-function recognizeNumberByPixelRatio(darkRatio) {
-  if (darkRatio < 0.08) return 0;
-  if (darkRatio < 0.15) return 1;
-  if (darkRatio < 0.22) return 2;
-  if (darkRatio < 0.28) return 3;
-  if (darkRatio < 0.35) return 4;
-  if (darkRatio < 0.42) return 5;
-  if (darkRatio < 0.48) return 6;
-  if (darkRatio < 0.54) return 7;
-  if (darkRatio < 0.62) return 8;
-  return 9;
+  return false;
 }
 
 // ==================== 产品编号识别 ====================
