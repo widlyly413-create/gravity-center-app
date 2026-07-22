@@ -12,75 +12,97 @@ const REGIONS = {
   sensor4: { x1: 650, x2: 950, y1: 340, y2: 475 }
 };
 
+let Tesseract = null;
+
+async function loadTesseract() {
+  if (Tesseract) return Tesseract;
+  
+  try {
+    Tesseract = await import('tesseract.js');
+    console.log('✓ Tesseract.js 加载成功');
+    return Tesseract;
+  } catch (error) {
+    console.error('❌ Tesseract.js 加载失败:', error);
+    throw error;
+  }
+}
+
 export async function processImage(file) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      console.log(`原始图片尺寸: ${img.width} x ${img.height}`);
+  return new Promise(async (resolve) => {
+    try {
+      await loadTesseract();
       
-      const srcCanvas = document.createElement('canvas');
-      srcCanvas.width = img.width;
-      srcCanvas.height = img.height;
-      const srcCtx = srcCanvas.getContext('2d');
-      srcCtx.drawImage(img, 0, 0);
-      
-      // 第一步：使用纯 JS 边缘检测
-      let rect = detectScreenByEdge(srcCtx, img.width, img.height);
-      
-      // 如果边缘检测失败，尝试蓝色掩膜检测
-      if (!rect) {
-        console.log('❌ 边缘检测失败，尝试蓝色掩膜检测');
-        rect = detectScreenByBlueMask(srcCtx, img.width, img.height);
+      const img = new Image();
+      img.onload = async () => {
+        console.log(`原始图片尺寸: ${img.width} x ${img.height}`);
         
-        if (rect) {
-          console.log(`蓝色掩膜检测成功，获取到角点: TL(${rect[0].x},${rect[0].y}) TR(${rect[1].x},${rect[1].y}) BR(${rect[2].x},${rect[2].y}) BL(${rect[3].x},${rect[3].y})`);
-          if (!isValidAspectRatio(rect)) {
-            console.log('⚠️ 蓝色掩膜检测结果不符合 1030:590 比例');
-            rect = null;
+        const srcCanvas = document.createElement('canvas');
+        srcCanvas.width = img.width;
+        srcCanvas.height = img.height;
+        const srcCtx = srcCanvas.getContext('2d');
+        srcCtx.drawImage(img, 0, 0);
+        
+        // 第一步：使用纯 JS 边缘检测
+        let rect = detectScreenByEdge(srcCtx, img.width, img.height);
+        
+        // 如果边缘检测失败，尝试蓝色掩膜检测
+        if (!rect) {
+          console.log('❌ 边缘检测失败，尝试蓝色掩膜检测');
+          rect = detectScreenByBlueMask(srcCtx, img.width, img.height);
+          
+          if (rect) {
+            console.log(`蓝色掩膜检测成功，获取到角点: TL(${rect[0].x},${rect[0].y}) TR(${rect[1].x},${rect[1].y}) BR(${rect[2].x},${rect[2].y}) BL(${rect[3].x},${rect[3].y})`);
+            if (!isValidAspectRatio(rect)) {
+              console.log('⚠️ 蓝色掩膜检测结果不符合 1030:590 比例');
+              rect = null;
+            }
+          } else {
+            console.log('❌ 蓝色掩膜检测也失败');
           }
         } else {
-          console.log('❌ 蓝色掩膜检测也失败');
+          console.log('✓ 边缘检测成功');
         }
-      } else {
-        console.log('✓ 边缘检测成功');
-      }
-      
-      // 几何兜底：如果所有检测都失败，使用图片中心的标准比例框
-      if (!rect) {
-        console.log('⚠️ 启用几何兜底：使用图片中心区域');
-        rect = getCenterQuadrilateral(img.width, img.height);
-        console.log(`兜底区域: TL(${rect[0].x},${rect[0].y}) TR(${rect[1].x},${rect[1].y}) BR(${rect[2].x},${rect[2].y}) BL(${rect[3].x},${rect[3].y})`);
-      }
-      
-      const tl = rect[0];
-      const tr = rect[1];
-      const br = rect[2];
-      const bl = rect[3];
-      
-      // 执行透视变换到固定尺寸 1030x590
-      const dstPts = [
-        { x: 0, y: 0 },
-        { x: TARGET_WIDTH, y: 0 },
-        { x: TARGET_WIDTH, y: TARGET_HEIGHT },
-        { x: 0, y: TARGET_HEIGHT }
-      ];
-      
-      const M = getPerspectiveTransform(rect, dstPts);
-      
-      const screenCanvas = document.createElement('canvas');
-      screenCanvas.width = TARGET_WIDTH;
-      screenCanvas.height = TARGET_HEIGHT;
-      const screenCtx = screenCanvas.getContext('2d');
-      applyPerspectiveTransform(screenCtx, img, M, TARGET_WIDTH, TARGET_HEIGHT);
-      
-      // 提取读数
-      const results = extractReadingsFromPerspectiveImage(screenCtx);
-      resolve(results);
-    };
-    img.onerror = () => {
-      resolve({ success: false, error: '图片加载失败' });
-    };
-    img.src = URL.createObjectURL(file);
+        
+        // 几何兜底：如果所有检测都失败，使用图片中心的标准比例框
+        if (!rect) {
+          console.log('⚠️ 启用几何兜底：使用图片中心区域');
+          rect = getCenterQuadrilateral(img.width, img.height);
+          console.log(`兜底区域: TL(${rect[0].x},${rect[0].y}) TR(${rect[1].x},${rect[1].y}) BR(${rect[2].x},${rect[2].y}) BL(${rect[3].x},${rect[3].y})`);
+        }
+        
+        const tl = rect[0];
+        const tr = rect[1];
+        const br = rect[2];
+        const bl = rect[3];
+        
+        // 执行透视变换到固定尺寸 1030x590
+        const dstPts = [
+          { x: 0, y: 0 },
+          { x: TARGET_WIDTH, y: 0 },
+          { x: TARGET_WIDTH, y: TARGET_HEIGHT },
+          { x: 0, y: TARGET_HEIGHT }
+        ];
+        
+        const M = getPerspectiveTransform(rect, dstPts);
+        
+        const screenCanvas = document.createElement('canvas');
+        screenCanvas.width = TARGET_WIDTH;
+        screenCanvas.height = TARGET_HEIGHT;
+        const screenCtx = screenCanvas.getContext('2d');
+        applyPerspectiveTransform(screenCtx, img, M, TARGET_WIDTH, TARGET_HEIGHT);
+        
+        // 提取读数（异步调用）
+        const results = await extractReadingsFromPerspectiveImage(screenCtx);
+        resolve(results);
+      };
+      img.onerror = () => {
+        resolve({ success: false, error: '图片加载失败' });
+      };
+      img.src = URL.createObjectURL(file);
+    } catch (error) {
+      console.error('图像处理错误:', error);
+      resolve({ success: false, error: error.message });
+    }
   });
 }
 
@@ -369,121 +391,16 @@ function calculateContourArea(contour) {
   return Math.abs(area / 2);
 }
 
-// 计算周长
-function calculatePerimeter(contour) {
-  let perimeter = 0;
-  for (let i = 0; i < contour.length; i++) {
-    const j = (i + 1) % contour.length;
-    const dx = contour[j].x - contour[i].x;
-    const dy = contour[j].y - contour[i].y;
-    perimeter += Math.sqrt(dx * dx + dy * dy);
-  }
-  return perimeter;
-}
-
-// 多边形逼近（Ramer-Douglas-Peucker算法）
-function approximatePolygon(contour, tolerance) {
-  if (contour.length < 3) return contour;
-  
-  const perimeter = calculatePerimeter(contour);
-  const epsilon = tolerance * perimeter;
-  
-  return ramerDouglasPeucker(contour, epsilon);
-}
-
-// Ramer-Douglas-Peucker算法实现
-function ramerDouglasPeucker(points, epsilon) {
-  if (points.length <= 2) return points;
-  
-  let maxDist = 0;
-  let index = 0;
-  const start = points[0];
-  const end = points[points.length - 1];
-  
-  for (let i = 1; i < points.length - 1; i++) {
-    const dist = pointToLineDistance(points[i], start, end);
-    if (dist > maxDist) {
-      maxDist = dist;
-      index = i;
-    }
-  }
-  
-  if (maxDist > epsilon) {
-    const left = ramerDouglasPeucker(points.slice(0, index + 1), epsilon);
-    const right = ramerDouglasPeucker(points.slice(index), epsilon);
-    return left.slice(0, -1).concat(right);
-  } else {
-    return [start, end];
-  }
-}
-
-// 点到线距离
-function pointToLineDistance(point, lineStart, lineEnd) {
-  const A = point.x - lineStart.x;
-  const B = point.y - lineStart.y;
-  const C = lineEnd.x - lineStart.x;
-  const D = lineEnd.y - lineStart.y;
-  
-  const dot = A * C + B * D;
-  const lenSq = C * C + D * D;
-  let param = -1;
-  
-  if (lenSq !== 0) param = dot / lenSq;
-  
-  let xx, yy;
-  
-  if (param < 0) {
-    xx = lineStart.x;
-    yy = lineStart.y;
-  } else if (param > 1) {
-    xx = lineEnd.x;
-    yy = lineEnd.y;
-  } else {
-    xx = lineStart.x + param * C;
-    yy = lineStart.y + param * D;
-  }
-  
-  const dx = point.x - xx;
-  const dy = point.y - yy;
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-// 角点排序（左上、右上、右下、左下）
-function orderPoints(pts) {
-  const rect = [{}, {}, {}, {}];
-  
-  const sums = pts.map(p => p.x + p.y);
-  const minSumIdx = sums.indexOf(Math.min(...sums));
-  const maxSumIdx = sums.indexOf(Math.max(...sums));
-  
-  rect[0] = pts[minSumIdx];
-  rect[2] = pts[maxSumIdx];
-  
-  const diffs = pts.map(p => p.x - p.y);
-  const maxDiffIdx = diffs.indexOf(Math.max(...diffs));
-  const minDiffIdx = diffs.indexOf(Math.min(...diffs));
-  
-  rect[1] = pts[maxDiffIdx];
-  rect[3] = pts[minDiffIdx];
-  
-  console.log(`角点排序完成: TL(${rect[0].x},${rect[0].y}) TR(${rect[1].x},${rect[1].y}) BR(${rect[2].x},${rect[2].y}) BL(${rect[3].x},${rect[3].y})`);
-  
-  return rect;
-}
-
-// ==================== 几何兜底：获取图片中心的标准比例框 ====================
+// 几何兜底：获取图片中心的标准比例框
 function getCenterQuadrilateral(width, height) {
-  // 计算能容纳在图片中的最大 1030:590 比例区域
   const imgRatio = width / height;
   
   let targetW, targetH;
   
   if (imgRatio > TARGET_RATIO) {
-    // 图片比较宽，以高度为准
     targetH = height * 0.9;
     targetW = targetH * TARGET_RATIO;
   } else {
-    // 图片比较高，以宽度为准
     targetW = width * 0.9;
     targetH = targetW / TARGET_RATIO;
   }
@@ -499,8 +416,8 @@ function getCenterQuadrilateral(width, height) {
   ];
 }
 
-// ==================== 从透视变换后的图像提取读数 ====================
-function extractReadingsFromPerspectiveImage(screenCtx) {
+// ==================== 从透视变换后的图像提取读数（异步版本） ====================
+async function extractReadingsFromPerspectiveImage(screenCtx) {
   const readings = { "#1": 0, "#2": 0, "#3": 0, "#4": 0 };
   let productCode = "";
   
@@ -533,11 +450,13 @@ function extractReadingsFromPerspectiveImage(screenCtx) {
     
     enhancedCtx.putImageData(imageData, 0, 0);
     
-    readings["#1"] = recognizeNumberInRegion(enhancedCtx, REGIONS.sensor1);
-    readings["#2"] = recognizeNumberInRegion(enhancedCtx, REGIONS.sensor2);
-    readings["#3"] = recognizeNumberInRegion(enhancedCtx, REGIONS.sensor3);
-    readings["#4"] = recognizeNumberInRegion(enhancedCtx, REGIONS.sensor4);
+    // 使用 Tesseract 异步识别数字
+    readings["#1"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor1);
+    readings["#2"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor2);
+    readings["#3"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor3);
+    readings["#4"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor4);
     
+    // 识别产品编号
     const labelCanvas = document.createElement('canvas');
     const labelW = REGIONS.productCode.x2 - REGIONS.productCode.x1;
     const labelH = REGIONS.productCode.y2 - REGIONS.productCode.y1;
@@ -548,7 +467,7 @@ function extractReadingsFromPerspectiveImage(screenCtx) {
       REGIONS.productCode.x1, REGIONS.productCode.y1, labelW, labelH,
       0, 0, labelW, labelH);
     
-    productCode = recognizeProductCodeFromLabel(labelCtx, labelW, labelH);
+    productCode = await recognizeProductCodeFromLabel(labelCtx, labelW, labelH);
     
     const totalWeight = readings["#1"] + readings["#2"] + readings["#3"] + readings["#4"];
     const avgWeight = totalWeight / 4;
@@ -752,65 +671,109 @@ function applyPerspectiveTransform(ctx, img, M, width, height) {
   ctx.putImageData(imageData, 0, 0);
 }
 
-// ==================== 数字识别（七段数码管算法） ====================
-function recognizeNumberInRegion(ctx, region) {
+// ==================== 数字识别（使用 Tesseract OCR） ====================
+async function recognizeNumberInRegion(ctx, region) {
   try {
     const { x1, x2, y1, y2 } = region;
     const w = x2 - x1;
     const h = y2 - y1;
     
-    return recognizeBySevenSegments(ctx, x1, y1, w, h);
+    // 创建区域画布
+    const regionCanvas = document.createElement('canvas');
+    regionCanvas.width = w;
+    regionCanvas.height = h;
+    const regionCtx = regionCanvas.getContext('2d');
+    regionCtx.drawImage(ctx.canvas, x1, y1, w, h, 0, 0, w, h);
+    
+    // 使用 Tesseract 进行 OCR
+    const { createWorker } = Tesseract;
+    const worker = await createWorker({
+      logger: m => console.log(`Tesseract: ${m.status}`)
+    });
+    
+    await worker.load();
+    await worker.loadLanguage('eng');
+    await worker.initialize('eng');
+    
+    // 配置只识别数字
+    await worker.setParameters({
+      tessedit_char_whitelist: '0123456789.',
+      tessedit_pageseg_mode: '6'
+    });
+    
+    const { data: { text } } = await worker.recognize(regionCanvas);
+    await worker.terminate();
+    
+    // 清理识别结果
+    const cleanedText = text.trim().replace(/[^0-9.]/g, '');
+    
+    if (!cleanedText) {
+      console.log(`Tesseract 未识别到数字，返回 0`);
+      return 0;
+    }
+    
+    // 解析数字
+    const numValue = parseFloat(cleanedText);
+    
+    if (isNaN(numValue)) {
+      console.log(`Tesseract 识别结果 "${cleanedText}" 无法解析为数字，返回 0`);
+      return 0;
+    }
+    
+    console.log(`Tesseract 识别成功: "${cleanedText}" → ${numValue}`);
+    return numValue;
+    
   } catch (error) {
-    console.error('数字识别错误:', error);
+    console.error('Tesseract 识别错误:', error);
+    // 回退到简单的七段数码管识别
+    return fallbackRecognizeNumber(ctx, region);
+  }
+}
+
+// 回退的数字识别（七段数码管算法）
+function fallbackRecognizeNumber(ctx, region) {
+  try {
+    const { x1, x2, y1, y2 } = region;
+    const w = x2 - x1;
+    const h = y2 - y1;
+    
+    const imageData = ctx.getImageData(x1, y1, w, h);
+    const data = imageData.data;
+    
+    const segDef = {
+      a: { x: 25, y: 5, w: 50, h: 12 },
+      b: { x: 72, y: 15, w: 12, h: 28 },
+      c: { x: 72, y: 48, w: 12, h: 28 },
+      d: { x: 25, y: 78, w: 50, h: 12 },
+      e: { x: 8, y: 48, w: 12, h: 28 },
+      f: { x: 8, y: 15, w: 12, h: 28 },
+      g: { x: 25, y: 42, w: 50, h: 12 }
+    };
+    
+    const segments = {};
+    for (const [key, def] of Object.entries(segDef)) {
+      const segX = Math.floor(def.x / 100 * w);
+      const segY = Math.floor(def.y / 100 * h);
+      const segW = Math.floor(def.w / 100 * w);
+      const segH = Math.floor(def.h / 100 * h);
+      
+      segments[key] = isSegmentOnFallback(imageData, w, segX, segY, segW, segH);
+    }
+    
+    const num = decodeSevenSegments(segments);
+    const hasDecimal = detectDecimalPointFallback(ctx, x1, y1, w, h);
+    
+    console.log(`回退识别: 数字=${num}, 有小数点=${hasDecimal}`);
+    
+    return hasDecimal ? num + 0.5 : num;
+    
+  } catch (error) {
+    console.error('回退识别错误:', error);
     return 0;
   }
 }
 
-// 七段数码管布局:
-//   a 
-// f b
-//   g 
-// e c
-//   d 
-
-function recognizeBySevenSegments(ctx, x, y, w, h) {
-  const imageData = ctx.getImageData(x, y, w, h);
-  const data = imageData.data;
-  
-  // 定义7个段的区域
-  const segDef = {
-    a: { x: 25, y: 5, w: 50, h: 12 },   // 上横
-    b: { x: 72, y: 15, w: 12, h: 28 },  // 右上竖
-    c: { x: 72, y: 48, w: 12, h: 28 },  // 右下竖
-    d: { x: 25, y: 78, w: 50, h: 12 },  // 下横
-    e: { x: 8, y: 48, w: 12, h: 28 },   // 左下竖
-    f: { x: 8, y: 15, w: 12, h: 28 },   // 左上竖
-    g: { x: 25, y: 42, w: 50, h: 12 }   // 中横
-  };
-  
-  // 计算每个段的暗色像素比例
-  const segments = {};
-  for (const [key, def] of Object.entries(segDef)) {
-    const segX = Math.floor(def.x / 100 * w);
-    const segY = Math.floor(def.y / 100 * h);
-    const segW = Math.floor(def.w / 100 * w);
-    const segH = Math.floor(def.h / 100 * h);
-    
-    segments[key] = isSegmentOn(imageData, w, segX, segY, segW, segH);
-  }
-  
-  // 识别数字
-  const num = decodeSevenSegments(segments);
-  
-  // 检测小数点（动态定位）
-  const hasDecimal = detectDecimalPoint(ctx, x, y, w, h);
-  
-  console.log(`七段识别: 段状态 a=${segments.a} b=${segments.b} c=${segments.c} d=${segments.d} e=${segments.e} f=${segments.f} g=${segments.g} → 数字=${num}, 有小数点=${hasDecimal}`);
-  
-  return hasDecimal ? num + 0.5 : num;
-}
-
-function isSegmentOn(imageData, width, x, y, w, h) {
+function isSegmentOnFallback(imageData, width, x, y, w, h) {
   const data = imageData.data;
   let darkCount = 0;
   let total = 0;
@@ -835,7 +798,6 @@ function isSegmentOn(imageData, width, x, y, w, h) {
 }
 
 function decodeSevenSegments(s) {
-  // 七段数码管编码表
   if (s.a && s.b && s.c && s.d && s.e && s.f && !s.g) return 0;
   if (!s.a && s.b && s.c && !s.d && !s.e && !s.f && !s.g) return 1;
   if (s.a && s.b && !s.c && s.d && s.e && !s.f && s.g) return 2;
@@ -847,21 +809,18 @@ function decodeSevenSegments(s) {
   if (s.a && s.b && s.c && s.d && s.e && s.f && s.g) return 8;
   if (s.a && s.b && s.c && s.d && !s.e && s.f && s.g) return 9;
   
-  // 如果无法识别，尝试简化判断
   const onCount = Object.values(s).filter(v => v).length;
   if (onCount <= 2) return 1;
   if (onCount === 3) return 7;
   if (onCount === 4) return 4;
-  if (onCount === 5) return [2, 3, 5][Math.floor(Math.random() * 3)];
-  if (onCount === 6) return [0, 6, 9][Math.floor(Math.random() * 3)];
+  if (onCount === 5) return 2;
+  if (onCount === 6) return 0;
   if (onCount === 7) return 8;
   
   return 0;
 }
 
-// 动态检测小数点位置
-function detectDecimalPoint(ctx, x, y, w, h) {
-  // 在数字区域右侧扫描寻找小数点
+function detectDecimalPointFallback(ctx, x, y, w, h) {
   const scanX = x + Math.floor(w * 0.7);
   const scanWidth = Math.floor(w * 0.25);
   const scanHeight = h;
@@ -869,17 +828,12 @@ function detectDecimalPoint(ctx, x, y, w, h) {
   const imageData = ctx.getImageData(scanX, y, scanWidth, scanHeight);
   const data = imageData.data;
   
-  // 寻找垂直方向上的小暗点（小数点）
-  const dotMinSize = 3;
-  const dotMaxSize = 12;
-  
   for (let py = Math.floor(h * 0.3); py < Math.floor(h * 0.7); py++) {
     for (let px = 0; px < scanWidth; px++) {
       const i = (py * scanWidth + px) * 4;
       const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
       
       if (brightness < 100) {
-        // 找到暗点，检查是否是小数点大小
         let dotSize = 0;
         for (let dy = -2; dy <= 2; dy++) {
           for (let dx = -2; dx <= 2; dx++) {
@@ -894,7 +848,7 @@ function detectDecimalPoint(ctx, x, y, w, h) {
           }
         }
         
-        if (dotSize >= dotMinSize && dotSize <= dotMaxSize) {
+        if (dotSize >= 3 && dotSize <= 12) {
           return true;
         }
       }
@@ -904,74 +858,33 @@ function detectDecimalPoint(ctx, x, y, w, h) {
   return false;
 }
 
-// ==================== 产品编号识别 ====================
-function recognizeProductCodeFromLabel(ctx, width, height) {
+// ==================== 产品编号识别（使用 Tesseract） ====================
+async function recognizeProductCodeFromLabel(ctx, width, height) {
   try {
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const data = imageData.data;
+    const { createWorker } = Tesseract;
+    const worker = await createWorker({
+      logger: m => console.log(`Tesseract (产品编号): ${m.status}`)
+    });
     
-    let darkPixelCount = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      if (brightness < 128) {
-        darkPixelCount++;
-      }
-    }
+    await worker.load();
+    await worker.loadLanguage('eng');
+    await worker.initialize('eng');
     
-    const darkRatio = darkPixelCount / (width * height);
+    await worker.setParameters({
+      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+      tessedit_pageseg_mode: '6'
+    });
     
-    if (darkRatio < 0.005) {
-      return "";
-    }
+    const { data: { text } } = await worker.recognize(ctx.canvas);
+    await worker.terminate();
     
-    const chars = [];
-    const charWidth = Math.floor(width / 8);
+    const cleanedText = text.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+    console.log(`产品编号识别: "${cleanedText}"`);
     
-    for (let i = 0; i < 8; i++) {
-      const charX = i * charWidth;
-      const charData = ctx.getImageData(charX, 0, charWidth, height);
-      const char = recognizeSingleChar(charData, charWidth, height);
-      if (char) chars.push(char);
-    }
+    return cleanedText;
     
-    return chars.join('');
   } catch (error) {
     console.error('产品编号识别错误:', error);
     return "";
   }
-}
-
-function recognizeSingleChar(imageData, width, height) {
-  const data = imageData.data;
-  
-  let darkPixelCount = 0;
-  for (let i = 0; i < data.length; i += 4) {
-    const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-    if (brightness < 128) {
-      darkPixelCount++;
-    }
-  }
-  
-  const darkRatio = darkPixelCount / (width * height);
-  
-  if (darkRatio < 0.02) return '';
-  
-  const charPatterns = {
-    'A': 0.45, 'B': 0.42, 'C': 0.38, 'D': 0.41, 'E': 0.40, 'F': 0.35,
-    '0': 0.38, '1': 0.15, '2': 0.35, '3': 0.36, '4': 0.28, '5': 0.34,
-    '6': 0.40, '7': 0.22, '8': 0.45, '9': 0.41
-  };
-  
-  let bestMatch = '';
-  let bestDiff = Infinity;
-  
-  for (const [char, ratio] of Object.entries(charPatterns)) {
-    const diff = Math.abs(darkRatio - ratio);
-    if (diff < bestDiff && diff < 0.1) {
-      bestDiff = diff;
-      bestMatch = char;
-    }
-  }
-  
-  return bestMatch;
 }
