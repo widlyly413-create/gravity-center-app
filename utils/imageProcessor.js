@@ -674,8 +674,8 @@ async function recognizeNumberInRegion(ctx, region) {
   }
 }
 
-// 图像预处理：灰度化、二值化、可选反色
-function preprocessImageForOCR(inputCanvas, invert = true) {
+// 图像预处理：灰度化、二值化、可选反色、膨胀处理
+function preprocessImageForOCR(inputCanvas, invert = true, dilate = true) {
   const width = inputCanvas.width;
   const height = inputCanvas.height;
   
@@ -711,8 +711,60 @@ function preprocessImageForOCR(inputCanvas, invert = true) {
     data[i + 3] = 255;
   }
   
+  if (dilate) {
+    dilateImageData(imageData);
+  }
+  
   ctx.putImageData(imageData, 0, 0);
   return outputCanvas;
+}
+
+// 图像膨胀：将白色区域扩大，使七段数码管的断开笔画连接
+function dilateImageData(imageData) {
+  const width = imageData.width;
+  const height = imageData.height;
+  const data = imageData.data;
+  const tempData = new Uint8ClampedArray(data.length);
+  
+  for (let i = 0; i < data.length; i++) {
+    tempData[i] = data[i];
+  }
+  
+  const kernelSize = 2;
+  
+  for (let y = kernelSize; y < height - kernelSize; y++) {
+    for (let x = kernelSize; x < width - kernelSize; x++) {
+      const i = (y * width + x) * 4;
+      
+      if (data[i] === 0) {
+        let hasWhite = false;
+        
+        for (let ky = -kernelSize; ky <= kernelSize && !hasWhite; ky++) {
+          for (let kx = -kernelSize; kx <= kernelSize && !hasWhite; kx++) {
+            const ny = y + ky;
+            const nx = x + kx;
+            
+            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+              const ni = (ny * width + nx) * 4;
+              if (data[ni] === 255) {
+                hasWhite = true;
+              }
+            }
+          }
+        }
+        
+        if (hasWhite) {
+          tempData[i] = 255;
+          tempData[i + 1] = 255;
+          tempData[i + 2] = 255;
+        }
+      }
+    }
+  }
+  
+  for (let i = 0; i < data.length; i++) {
+    data[i] = tempData[i];
+  }
 }
 
 function fallbackRecognizeNumber(ctx, region) {
@@ -721,35 +773,25 @@ function fallbackRecognizeNumber(ctx, region) {
     const w = x2 - x1;
     const h = y2 - y1;
     
-    const imageData = ctx.getImageData(x1, y1, w, h);
+    const regionCanvas = document.createElement('canvas');
+    regionCanvas.width = w;
+    regionCanvas.height = h;
+    const regionCtx = regionCanvas.getContext('2d');
+    regionCtx.drawImage(ctx.canvas, x1, y1, w, h, 0, 0, w, h);
+    
+    const processedCanvas = preprocessImageForOCR(regionCanvas);
+    const imageData = processedCanvas.getContext('2d').getImageData(0, 0, w, h);
     const data = imageData.data;
     
-    const segDef = {
-      a: { x: 25, y: 5, w: 50, h: 12 },
-      b: { x: 72, y: 15, w: 12, h: 28 },
-      c: { x: 72, y: 48, w: 12, h: 28 },
-      d: { x: 25, y: 78, w: 50, h: 12 },
-      e: { x: 8, y: 48, w: 12, h: 28 },
-      f: { x: 8, y: 15, w: 12, h: 28 },
-      g: { x: 25, y: 42, w: 50, h: 12 }
-    };
+    const numStr = recognizeDigitsFromCanvas(imageData, w, h);
     
-    const segments = {};
-    for (const [key, def] of Object.entries(segDef)) {
-      const segX = Math.floor(def.x / 100 * w);
-      const segY = Math.floor(def.y / 100 * h);
-      const segW = Math.floor(def.w / 100 * w);
-      const segH = Math.floor(def.h / 100 * h);
-      
-      segments[key] = isSegmentOnFallback(imageData, w, segX, segY, segW, segH);
+    if (!numStr) {
+      console.log('回退识别: 无法识别数字');
+      return 0;
     }
     
-    const num = decodeSevenSegments(segments);
-    const hasDecimal = detectDecimalPointFallback(ctx, x1, y1, w, h);
-    
-    console.log(`回退识别: 数字=${num}, 有小数点=${hasDecimal}`);
-    
-    return hasDecimal ? num + 0.5 : num;
+    console.log(`回退识别: "${numStr}"`);
+    return parseFloat(numStr) || 0;
     
   } catch (error) {
     console.error('回退识别错误:', error);
@@ -757,8 +799,83 @@ function fallbackRecognizeNumber(ctx, region) {
   }
 }
 
-function isSegmentOnFallback(imageData, width, x, y, w, h) {
+function recognizeDigitsFromCanvas(imageData, width, height) {
   const data = imageData.data;
+  
+  const charWidth = Math.floor(width / 5);
+  const chars = [];
+  
+  for (let charIdx = 0; charIdx < 5; charIdx++) {
+    const charX = charIdx * charWidth;
+    const charW = Math.min(charWidth, width - charX);
+    
+    if (charW < 5) break;
+    
+    const digit = recognizeSingleDigit(imageData, charX, 0, charW, height);
+    if (digit !== null) {
+      chars.push(digit);
+    }
+  }
+  
+  return chars.join('');
+}
+
+function recognizeSingleDigit(imageData, x, y, w, h) {
+  const data = imageData.data;
+  const width = imageData.width;
+  
+  const segDef = {
+    a: { x: 20, y: 5, w: 60, h: 15 },
+    b: { x: 75, y: 12, w: 15, h: 35 },
+    c: { x: 75, y: 52, w: 15, h: 35 },
+    d: { x: 20, y: 82, w: 60, h: 15 },
+    e: { x: 5, y: 52, w: 15, h: 35 },
+    f: { x: 5, y: 12, w: 15, h: 35 },
+    g: { x: 20, y: 45, w: 60, h: 12 }
+  };
+  
+  const segments = {};
+  let totalOn = 0;
+  
+  for (const [key, def] of Object.entries(segDef)) {
+    const segX = Math.floor(def.x / 100 * w);
+    const segY = Math.floor(def.y / 100 * h);
+    const segW = Math.floor(def.w / 100 * w);
+    const segH = Math.floor(def.h / 100 * h);
+    
+    const isOn = checkSegment(data, width, x + segX, y + segY, segW, segH);
+    segments[key] = isOn;
+    if (isOn) totalOn++;
+  }
+  
+  if (totalOn === 0) return null;
+  
+  if (!segments.a && !segments.b && !segments.c && !segments.d && !segments.e && !segments.f && !segments.g) return null;
+  
+  if (segments.a && segments.b && segments.c && segments.d && segments.e && segments.f && !segments.g) return '0';
+  if (!segments.a && segments.b && segments.c && !segments.d && !segments.e && !segments.f && !segments.g) return '1';
+  if (segments.a && segments.b && !segments.c && segments.d && segments.e && !segments.f && segments.g) return '2';
+  if (segments.a && segments.b && segments.c && segments.d && !segments.e && !segments.f && segments.g) return '3';
+  if (!segments.a && segments.b && segments.c && !segments.d && !segments.e && segments.f && segments.g) return '4';
+  if (segments.a && !segments.b && segments.c && segments.d && !segments.e && segments.f && segments.g) return '5';
+  if (segments.a && !segments.b && segments.c && segments.d && segments.e && segments.f && segments.g) return '6';
+  if (segments.a && segments.b && segments.c && !segments.d && !segments.e && !segments.f && !segments.g) return '7';
+  if (segments.a && segments.b && segments.c && segments.d && segments.e && segments.f && segments.g) return '8';
+  if (segments.a && segments.b && segments.c && segments.d && !segments.e && segments.f && segments.g) return '9';
+  if (!segments.a && !segments.b && !segments.c && !segments.d && !segments.e && !segments.f && !segments.g) return '.';
+  
+  if (totalOn === 2 && segments.b && segments.c) return '1';
+  if (totalOn === 3 && segments.a && segments.b && segments.c) return '7';
+  if (totalOn === 4 && segments.b && segments.c && segments.f && segments.g) return '4';
+  if (totalOn === 5 && segments.a && segments.b && segments.g && segments.d && segments.e) return '2';
+  if (totalOn === 5 && segments.a && segments.b && segments.g && segments.c && segments.d) return '3';
+  if (totalOn === 6 && !segments.d) return '0';
+  if (totalOn === 6 && !segments.a) return '6';
+  
+  return null;
+}
+
+function checkSegment(data, width, x, y, w, h) {
   let darkCount = 0;
   let total = 0;
   
@@ -778,73 +895,12 @@ function isSegmentOnFallback(imageData, width, x, y, w, h) {
     }
   }
   
-  return total > 0 && (darkCount / total) > 0.3;
-}
-
-function decodeSevenSegments(s) {
-  if (s.a && s.b && s.c && s.d && s.e && s.f && !s.g) return 0;
-  if (!s.a && s.b && s.c && !s.d && !s.e && !s.f && !s.g) return 1;
-  if (s.a && s.b && !s.c && s.d && s.e && !s.f && s.g) return 2;
-  if (s.a && s.b && s.c && s.d && !s.e && !s.f && s.g) return 3;
-  if (!s.a && s.b && s.c && !s.d && !s.e && s.f && s.g) return 4;
-  if (s.a && !s.b && s.c && s.d && !s.e && s.f && s.g) return 5;
-  if (s.a && !s.b && s.c && s.d && s.e && s.f && s.g) return 6;
-  if (s.a && s.b && s.c && !s.d && !s.e && !s.f && !s.g) return 7;
-  if (s.a && s.b && s.c && s.d && s.e && s.f && s.g) return 8;
-  if (s.a && s.b && s.c && s.d && !s.e && s.f && s.g) return 9;
-  
-  const onCount = Object.values(s).filter(v => v).length;
-  if (onCount <= 2) return 1;
-  if (onCount === 3) return 7;
-  if (onCount === 4) return 4;
-  if (onCount === 5) return 2;
-  if (onCount === 6) return 0;
-  if (onCount === 7) return 8;
-  
-  return 0;
-}
-
-function detectDecimalPointFallback(ctx, x, y, w, h) {
-  const scanX = x + Math.floor(w * 0.7);
-  const scanWidth = Math.floor(w * 0.25);
-  const scanHeight = h;
-  
-  const imageData = ctx.getImageData(scanX, y, scanWidth, scanHeight);
-  const data = imageData.data;
-  
-  for (let py = Math.floor(h * 0.3); py < Math.floor(h * 0.7); py++) {
-    for (let px = 0; px < scanWidth; px++) {
-      const i = (py * scanWidth + px) * 4;
-      const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      
-      if (brightness < 100) {
-        let dotSize = 0;
-        for (let dy = -2; dy <= 2; dy++) {
-          for (let dx = -2; dx <= 2; dx++) {
-            const ny = py + dy;
-            const nx = px + dx;
-            if (ny >= 0 && ny < scanHeight && nx >= 0 && nx < scanWidth) {
-              const ni = (ny * scanWidth + nx) * 4;
-              if ((data[ni] + data[ni + 1] + data[ni + 2]) / 3 < 100) {
-                dotSize++;
-              }
-            }
-          }
-        }
-        
-        if (dotSize >= 3 && dotSize <= 12) {
-          return true;
-        }
-      }
-    }
-  }
-  
-  return false;
+  return total > 0 && (darkCount / total) > 0.4;
 }
 
 async function recognizeProductCodeFromLabel(ctx, width, height) {
   try {
-    const processedCanvas = preprocessImageForOCR(ctx.canvas, false);
+    const processedCanvas = preprocessImageForOCR(ctx.canvas, false, false);
     
     const { createWorker } = Tesseract;
     const worker = await createWorker();
