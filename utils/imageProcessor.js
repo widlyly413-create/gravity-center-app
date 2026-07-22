@@ -637,9 +637,7 @@ async function recognizeNumberInRegion(ctx, region) {
     const processedCanvas = preprocessImageForOCR(regionCanvas);
     
     const { createWorker } = Tesseract;
-    const worker = await createWorker({
-      logger: () => {},
-    });
+    const worker = await createWorker();
     
     await worker.loadLanguage('eng');
     await worker.initialize('eng');
@@ -849,9 +847,7 @@ async function recognizeProductCodeFromLabel(ctx, width, height) {
     const processedCanvas = preprocessImageForOCR(ctx.canvas, false);
     
     const { createWorker } = Tesseract;
-    const worker = await createWorker({
-      logger: () => {},
-    });
+    const worker = await createWorker();
     
     await worker.loadLanguage('eng');
     await worker.initialize('eng');
