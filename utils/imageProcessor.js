@@ -5,11 +5,11 @@ const TARGET_RATIO = TARGET_WIDTH / TARGET_HEIGHT;
 
 // 区域坐标定义（按照用户提供的新坐标）
 const REGIONS = {
-  productCode: { x1: 0, x2: 435, y1: 0, y2: 90 },
-  sensor1: { x1: 175, x2: 470, y1: 90, y2: 225 },
-  sensor2: { x1: 650, x2: 950, y1: 90, y2: 225 },
-  sensor3: { x1: 175, x2: 470, y1: 340, y2: 475 },
-  sensor4: { x1: 650, x2: 950, y1: 340, y2: 475 }
+  productCode: { x1: 143, x2: 435, y1: 67, y2: 143 },
+  sensor1: { x1: 255, x2: 435, y1: 106, y2: 200 },
+  sensor2: { x1: 725, x2: 895, y1: 106, y2: 200 },
+  sensor3: { x1: 255, x2: 435, y1: 363, y2: 456 },
+  sensor4: { x1: 725, x2: 895, y1: 363, y2: 456 }
 };
 
 let Tesseract = null;
@@ -42,10 +42,8 @@ export async function processImage(file) {
         const srcCtx = srcCanvas.getContext('2d');
         srcCtx.drawImage(img, 0, 0);
         
-        // 第一步：使用纯 JS 边缘检测
         let rect = detectScreenByEdge(srcCtx, img.width, img.height);
         
-        // 如果边缘检测失败，尝试蓝色掩膜检测
         if (!rect) {
           console.log('❌ 边缘检测失败，尝试蓝色掩膜检测');
           rect = detectScreenByBlueMask(srcCtx, img.width, img.height);
@@ -63,7 +61,6 @@ export async function processImage(file) {
           console.log('✓ 边缘检测成功');
         }
         
-        // 几何兜底：如果所有检测都失败，使用图片中心的标准比例框
         if (!rect) {
           console.log('⚠️ 启用几何兜底：使用图片中心区域');
           rect = getCenterQuadrilateral(img.width, img.height);
@@ -75,7 +72,6 @@ export async function processImage(file) {
         const br = rect[2];
         const bl = rect[3];
         
-        // 执行透视变换到固定尺寸 1030x590
         const dstPts = [
           { x: 0, y: 0 },
           { x: TARGET_WIDTH, y: 0 },
@@ -91,7 +87,6 @@ export async function processImage(file) {
         const screenCtx = screenCanvas.getContext('2d');
         applyPerspectiveTransform(screenCtx, img, M, TARGET_WIDTH, TARGET_HEIGHT);
         
-        // 提取读数（异步调用）
         const results = await extractReadingsFromPerspectiveImage(screenCtx);
         resolve(results);
       };
@@ -106,18 +101,14 @@ export async function processImage(file) {
   });
 }
 
-// ==================== 纯 JS 边缘检测 ====================
 function detectScreenByEdge(ctx, width, height) {
   console.log(`\n=== 纯 JS 边缘检测开始 ===`);
   
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
-  
-  // 简化的边缘检测：使用 Sobel 算子
   const edges = [];
   const gray = [];
   
-  // 先转灰度
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i];
     const g = data[i + 1];
@@ -125,7 +116,6 @@ function detectScreenByEdge(ctx, width, height) {
     gray.push(Math.round(0.299 * r + 0.587 * g + 0.114 * b));
   }
   
-  // Sobel 边缘检测
   const sobelX = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]];
   const sobelY = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]];
   
@@ -148,12 +138,10 @@ function detectScreenByEdge(ctx, width, height) {
   
   console.log(`检测到 ${edges.length} 个边缘点`);
   
-  // 如果边缘点太少，返回 null
   if (edges.length < 100) {
     return null;
   }
   
-  // 找到边缘点的边界框
   let minX = width, maxX = 0, minY = height, maxY = 0;
   for (const pt of edges) {
     minX = Math.min(minX, pt.x);
@@ -165,7 +153,6 @@ function detectScreenByEdge(ctx, width, height) {
   const detectedWidth = maxX - minX;
   const detectedHeight = maxY - minY;
   
-  // 检查宽高比
   if (detectedWidth > 0 && detectedHeight > 0) {
     const ratio = detectedWidth / detectedHeight;
     const tolerance = 0.3;
@@ -184,14 +171,11 @@ function detectScreenByEdge(ctx, width, height) {
   return null;
 }
 
-// ==================== 纯 JS 蓝色掩膜检测（增强版） ====================
 function detectScreenByBlueMask(ctx, width, height) {
   console.log(`\n=== 纯 JS 蓝色掩膜检测开始 ===`);
   
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
-  
-  // 创建蓝色掩膜（单通道）
   const blueMask = new Uint8ClampedArray(width * height);
   
   for (let y = 0; y < height; y++) {
@@ -212,11 +196,9 @@ function detectScreenByBlueMask(ctx, width, height) {
     return null;
   }
   
-  // 形态学闭运算（膨胀+腐蚀）
   const closedMask = applyMorphologicalClose(blueMask, width, height, 20);
   console.log(`✓ 形态学闭运算完成`);
   
-  // 寻找轮廓
   const contours = findContours(closedMask, width, height);
   console.log(`✓ 轮廓检测完成，找到 ${contours.length} 个轮廓`);
   
@@ -224,7 +206,6 @@ function detectScreenByBlueMask(ctx, width, height) {
     return null;
   }
   
-  // 找到最大轮廓
   let maxArea = 0;
   let largestContour = null;
   for (const contour of contours) {
@@ -242,7 +223,6 @@ function detectScreenByBlueMask(ctx, width, height) {
   
   console.log(`最大轮廓面积: ${maxArea}, 点数: ${largestContour.length}`);
   
-  // 直接从轮廓点中找出四个角点（简单稳定）
   let tl = null, tr = null, br = null, bl = null;
   let minSum = Infinity, maxSum = -Infinity, maxDiff = -Infinity, minDiff = Infinity;
   
@@ -250,29 +230,10 @@ function detectScreenByBlueMask(ctx, width, height) {
     const sum = pt.x + pt.y;
     const diff = pt.x - pt.y;
     
-    // 左上角：x + y 最小
-    if (sum < minSum) {
-      minSum = sum;
-      tl = pt;
-    }
-    
-    // 右下角：x + y 最大
-    if (sum > maxSum) {
-      maxSum = sum;
-      br = pt;
-    }
-    
-    // 右上角：x - y 最大
-    if (diff > maxDiff) {
-      maxDiff = diff;
-      tr = pt;
-    }
-    
-    // 左下角：x - y 最小
-    if (diff < minDiff) {
-      minDiff = diff;
-      bl = pt;
-    }
+    if (sum < minSum) { minSum = sum; tl = pt; }
+    if (sum > maxSum) { maxSum = sum; br = pt; }
+    if (diff > maxDiff) { maxDiff = diff; tr = pt; }
+    if (diff < minDiff) { minDiff = diff; bl = pt; }
   }
   
   if (!tl || !tr || !br || !bl) {
@@ -285,12 +246,10 @@ function detectScreenByBlueMask(ctx, width, height) {
   return [tl, tr, br, bl];
 }
 
-// 形态学闭运算（膨胀+腐蚀）
 function applyMorphologicalClose(mask, width, height, kernelSize) {
   const halfKernel = Math.floor(kernelSize / 2);
   const result = new Uint8ClampedArray(mask.length);
   
-  // 膨胀
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       let hasWhite = false;
@@ -311,7 +270,6 @@ function applyMorphologicalClose(mask, width, height, kernelSize) {
     }
   }
   
-  // 腐蚀
   const finalResult = new Uint8ClampedArray(mask.length);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -339,7 +297,6 @@ function applyMorphologicalClose(mask, width, height, kernelSize) {
   return finalResult;
 }
 
-// 轮廓检测
 function findContours(mask, width, height) {
   const visited = new Uint8ClampedArray(mask.length);
   const contours = [];
@@ -376,7 +333,6 @@ function findContours(mask, width, height) {
   return contours;
 }
 
-// 计算轮廓面积
 function calculateContourArea(contour) {
   if (contour.length < 3) return 0;
   
@@ -391,7 +347,6 @@ function calculateContourArea(contour) {
   return Math.abs(area / 2);
 }
 
-// 几何兜底：获取图片中心的标准比例框
 function getCenterQuadrilateral(width, height) {
   const imgRatio = width / height;
   
@@ -416,7 +371,6 @@ function getCenterQuadrilateral(width, height) {
   ];
 }
 
-// ==================== 从透视变换后的图像提取读数（异步版本） ====================
 async function extractReadingsFromPerspectiveImage(screenCtx) {
   const readings = { "#1": 0, "#2": 0, "#3": 0, "#4": 0 };
   let productCode = "";
@@ -450,13 +404,11 @@ async function extractReadingsFromPerspectiveImage(screenCtx) {
     
     enhancedCtx.putImageData(imageData, 0, 0);
     
-    // 使用 Tesseract 异步识别数字
     readings["#1"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor1);
     readings["#2"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor2);
     readings["#3"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor3);
     readings["#4"] = await recognizeNumberInRegion(enhancedCtx, REGIONS.sensor4);
     
-    // 识别产品编号
     const labelCanvas = document.createElement('canvas');
     const labelW = REGIONS.productCode.x2 - REGIONS.productCode.x1;
     const labelH = REGIONS.productCode.y2 - REGIONS.productCode.y1;
@@ -503,7 +455,6 @@ async function extractReadingsFromPerspectiveImage(screenCtx) {
   }
 }
 
-// ==================== 颜色判断 ====================
 function isBlue(r, g, b) {
   const [h, s, v] = rgbToHsv(r, g, b);
   return h >= 200 && h <= 260 && s >= 50 && v >= 50;
@@ -557,7 +508,6 @@ function isValidAspectRatio(corners) {
   return isValid;
 }
 
-// ==================== 透视变换 ====================
 function getPerspectiveTransform(src, dst) {
   const m = [];
   
@@ -678,44 +628,40 @@ async function recognizeNumberInRegion(ctx, region) {
     const w = x2 - x1;
     const h = y2 - y1;
     
-    // 创建区域画布
     const regionCanvas = document.createElement('canvas');
     regionCanvas.width = w;
     regionCanvas.height = h;
     const regionCtx = regionCanvas.getContext('2d');
     regionCtx.drawImage(ctx.canvas, x1, y1, w, h, 0, 0, w, h);
     
-    // 使用 Tesseract 进行 OCR
+    const processedCanvas = preprocessImageForOCR(regionCanvas);
+    
     const { createWorker } = Tesseract;
-    const worker = await createWorker();
-    
-    await worker.load();
-    await worker.loadLanguage('eng');
-    await worker.initialize('eng');
-    
-    // 配置只识别数字
-    await worker.setParameters({
-      tessedit_char_whitelist: '0123456789.',
-      tessedit_pageseg_mode: '6'
+    const worker = await createWorker({
+      langPath: 'https://tessdata.projectnaptha.com/4.0.0',
     });
     
-    const { data: { text } } = await worker.recognize(regionCanvas);
+    await worker.setParameters({
+      tessedit_char_whitelist: '0123456789.',
+      tessedit_pageseg_mode: '7',
+      user_defined_dpi: '300',
+    });
+    
+    const { data: { text } } = await worker.recognize(processedCanvas);
     await worker.terminate();
     
-    // 清理识别结果
     const cleanedText = text.trim().replace(/[^0-9.]/g, '');
     
     if (!cleanedText) {
-      console.log(`Tesseract 未识别到数字，返回 0`);
-      return 0;
+      console.log(`Tesseract 未识别到数字，使用回退算法`);
+      return fallbackRecognizeNumber(ctx, region);
     }
     
-    // 解析数字
     const numValue = parseFloat(cleanedText);
     
     if (isNaN(numValue)) {
-      console.log(`Tesseract 识别结果 "${cleanedText}" 无法解析为数字，返回 0`);
-      return 0;
+      console.log(`Tesseract 识别结果 "${cleanedText}" 无法解析，使用回退算法`);
+      return fallbackRecognizeNumber(ctx, region);
     }
     
     console.log(`Tesseract 识别成功: "${cleanedText}" → ${numValue}`);
@@ -723,12 +669,51 @@ async function recognizeNumberInRegion(ctx, region) {
     
   } catch (error) {
     console.error('Tesseract 识别错误:', error);
-    // 回退到简单的七段数码管识别
     return fallbackRecognizeNumber(ctx, region);
   }
 }
 
-// 回退的数字识别（七段数码管算法）
+// 图像预处理：灰度化、二值化、可选反色
+function preprocessImageForOCR(inputCanvas, invert = true) {
+  const width = inputCanvas.width;
+  const height = inputCanvas.height;
+  
+  const outputCanvas = document.createElement('canvas');
+  outputCanvas.width = width;
+  outputCanvas.height = height;
+  const ctx = outputCanvas.getContext('2d');
+  
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+  
+  ctx.drawImage(inputCanvas, 0, 0);
+  const srcImageData = ctx.getImageData(0, 0, width, height);
+  const srcData = srcImageData.data;
+  
+  for (let i = 0; i < srcData.length; i += 4) {
+    const r = srcData[i];
+    const g = srcData[i + 1];
+    const b = srcData[i + 2];
+    
+    const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    
+    const threshold = 128;
+    let binary = gray < threshold ? 0 : 255;
+    
+    if (invert) {
+      binary = 255 - binary;
+    }
+    
+    data[i] = binary;
+    data[i + 1] = binary;
+    data[i + 2] = binary;
+    data[i + 3] = 255;
+  }
+  
+  ctx.putImageData(imageData, 0, 0);
+  return outputCanvas;
+}
+
 function fallbackRecognizeNumber(ctx, region) {
   try {
     const { x1, x2, y1, y2 } = region;
@@ -856,22 +841,22 @@ function detectDecimalPointFallback(ctx, x, y, w, h) {
   return false;
 }
 
-// ==================== 产品编号识别（使用 Tesseract） ====================
 async function recognizeProductCodeFromLabel(ctx, width, height) {
   try {
-    const { createWorker } = Tesseract;
-    const worker = await createWorker();
+    const processedCanvas = preprocessImageForOCR(ctx.canvas, false);
     
-    await worker.load();
-    await worker.loadLanguage('eng');
-    await worker.initialize('eng');
+    const { createWorker } = Tesseract;
+    const worker = await createWorker({
+      langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+    });
     
     await worker.setParameters({
       tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-      tessedit_pageseg_mode: '6'
+      tessedit_pageseg_mode: '7',
+      user_defined_dpi: '300',
     });
     
-    const { data: { text } } = await worker.recognize(ctx.canvas);
+    const { data: { text } } = await worker.recognize(processedCanvas);
     await worker.terminate();
     
     const cleanedText = text.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
